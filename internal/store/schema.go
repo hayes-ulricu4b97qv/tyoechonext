@@ -2,8 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +10,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func NewSQLiteRepository(path, legacyJSONPath string) (*SQLiteRepository, error) {
+func NewSQLiteRepository(path string) (*SQLiteRepository, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
@@ -25,18 +23,6 @@ func NewSQLiteRepository(path, legacyJSONPath string) (*SQLiteRepository, error)
 	db.SetMaxIdleConns(1)
 	repo := &SQLiteRepository{db: db}
 	if err := repo.migrate(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := repo.importLegacy(legacyJSONPath); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := repo.ensureOwnerUser(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := repo.backfillSessionUserIDs(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -179,10 +165,109 @@ func (r *SQLiteRepository) migrate() error {
 	if _, err := r.db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (6, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("record pages migration: %w", err)
 	}
-	if err := r.ensureOwnerUser(); err != nil {
+	if err := r.ensureReadingColumns(); err != nil {
 		return err
 	}
+	if _, err := r.db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (7, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record reading migration: %w", err)
+	}
+	if err := r.ensureSiteProfileColumns(); err != nil {
+		return err
+	}
+	if _, err := r.db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record site profile migration: %w", err)
+	}
 	return nil
+}
+
+func (r *SQLiteRepository) ensureReadingColumns() error {
+	additions := []struct {
+		table  string
+		column string
+		ddl    string
+	}{
+		{"sites", "posts_per_page", `ALTER TABLE sites ADD COLUMN posts_per_page INTEGER NOT NULL DEFAULT 10`},
+		{"sites", "comments_enabled", `ALTER TABLE sites ADD COLUMN comments_enabled INTEGER NOT NULL DEFAULT 1`},
+		{"sites", "comments_require_moderation", `ALTER TABLE sites ADD COLUMN comments_require_moderation INTEGER NOT NULL DEFAULT 1`},
+		{"sites", "comments_threaded", `ALTER TABLE sites ADD COLUMN comments_threaded INTEGER NOT NULL DEFAULT 1`},
+		{"posts", "allow_comment", `ALTER TABLE posts ADD COLUMN allow_comment INTEGER NOT NULL DEFAULT 1`},
+		{"comments", "parent_id", `ALTER TABLE comments ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`},
+		{"comments", "author_url", `ALTER TABLE comments ADD COLUMN author_url TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, addition := range additions {
+		names, err := r.columnNames(addition.table)
+		if err != nil {
+			return err
+		}
+		if names[addition.column] {
+			continue
+		}
+		if _, err := r.db.Exec(addition.ddl); err != nil {
+			return fmt.Errorf("add %s.%s: %w", addition.table, addition.column, err)
+		}
+	}
+	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS comments_parent_idx ON comments(parent_id, post_id)`); err != nil {
+		return fmt.Errorf("index comment parents: %w", err)
+	}
+	return nil
+}
+
+func (r *SQLiteRepository) ensureSiteProfileColumns() error {
+	additions := []struct {
+		table  string
+		column string
+		ddl    string
+	}{
+		{"sites", "description", `ALTER TABLE sites ADD COLUMN description TEXT NOT NULL DEFAULT ''`},
+		{"sites", "keywords", `ALTER TABLE sites ADD COLUMN keywords TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, addition := range additions {
+		names, err := r.columnNames(addition.table)
+		if err != nil {
+			return err
+		}
+		if names[addition.column] {
+			continue
+		}
+		if _, err := r.db.Exec(addition.ddl); err != nil {
+			return fmt.Errorf("add %s.%s: %w", addition.table, addition.column, err)
+		}
+	}
+	return nil
+}
+
+func (r *SQLiteRepository) columnNames(table string) (map[string]bool, error) {
+	var query string
+	switch table {
+	case "sites":
+		query = `PRAGMA table_info(sites)`
+	case "posts":
+		query = `PRAGMA table_info(posts)`
+	case "comments":
+		query = `PRAGMA table_info(comments)`
+	default:
+		return nil, fmt.Errorf("unsupported table %s", table)
+	}
+	rows, err := r.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	defer rows.Close()
+	names := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, fmt.Errorf("read %s schema: %w", table, err)
+		}
+		names[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s schema: %w", table, err)
+	}
+	return names, nil
 }
 
 func (r *SQLiteRepository) ensureSessionUserColumn() error {
@@ -219,87 +304,6 @@ func (r *SQLiteRepository) ensureSessionUserColumn() error {
 	}
 	if _, err := r.db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("record session user migration: %w", err)
-	}
-	return nil
-}
-
-func (r *SQLiteRepository) backfillSessionUserIDs() error {
-	if _, err := r.db.Exec(`UPDATE sessions SET user_id = (
-		SELECT id FROM users WHERE users.username = sessions.username
-	) WHERE user_id = '' AND EXISTS (
-		SELECT 1 FROM users WHERE users.username = sessions.username
-	)`); err != nil {
-		return fmt.Errorf("backfill session user references: %w", err)
-	}
-	return nil
-}
-
-func (r *SQLiteRepository) ensureOwnerUser() error {
-	var admin Admin
-	var createdAt string
-	err := r.db.QueryRow(`SELECT username, password_hash, email, created_at FROM admins WHERE id = 1`).Scan(&admin.Username, &admin.PasswordHash, &admin.Email, &createdAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read legacy administrator for migration: %w", err)
-	}
-	created := parseTime(createdAt)
-	if created.IsZero() {
-		created = time.Now().UTC()
-	}
-	_, err = r.db.Exec(`INSERT OR IGNORE INTO users(id, username, password_hash, email, role, active, created_at, updated_at)
-		VALUES ('user-owner', ?, ?, ?, 'owner', 1, ?, ?)`, admin.Username, admin.PasswordHash, admin.Email, formatTime(created), formatTime(created))
-	if err != nil {
-		return fmt.Errorf("migrate legacy administrator: %w", err)
-	}
-	return nil
-}
-func (r *SQLiteRepository) importLegacy(path string) error {
-	if path == "" || r.Initialized() {
-		return nil
-	}
-	content, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read legacy repository: %w", err)
-	}
-	var legacy struct {
-		Initialized bool   `json:"initialized"`
-		Site        *Site  `json:"site"`
-		Admin       *Admin `json:"admin"`
-		Posts       []Post `json:"posts"`
-	}
-	if err := json.Unmarshal(content, &legacy); err != nil {
-		return fmt.Errorf("decode legacy repository: %w", err)
-	}
-	if !legacy.Initialized || legacy.Site == nil || legacy.Admin == nil {
-		return nil
-	}
-	tx, err := r.db.Begin()
-	if err != nil {
-		return fmt.Errorf("start legacy migration: %w", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO sites(id, name, url, admin_mail, timezone, created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?)`, legacy.Site.Name, legacy.Site.URL, legacy.Site.AdminMail, legacy.Site.Timezone, formatTime(legacy.Site.CreatedAt), formatTime(legacy.Site.UpdatedAt)); err != nil {
-		return fmt.Errorf("migrate legacy site: %w", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO admins(id, username, password_hash, email, created_at) VALUES (1, ?, ?, ?, ?)`, legacy.Admin.Username, legacy.Admin.PasswordHash, legacy.Admin.Email, formatTime(legacy.Admin.CreatedAt)); err != nil {
-		return fmt.Errorf("migrate legacy admin: %w", err)
-	}
-	for _, post := range legacy.Posts {
-		var publishedAt any
-		if !post.PublishedAt.IsZero() {
-			publishedAt = formatTime(post.PublishedAt)
-		}
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO posts(id, title, slug, excerpt, content, status, published_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, post.ID, post.Title, post.Slug, post.Excerpt, post.Content, post.Status, publishedAt, formatTime(post.UpdatedAt)); err != nil {
-			return fmt.Errorf("migrate legacy post: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit legacy migration: %w", err)
 	}
 	return nil
 }

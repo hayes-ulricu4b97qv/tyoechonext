@@ -16,12 +16,20 @@ func (r *SQLiteRepository) Initialized() bool {
 func (r *SQLiteRepository) Site() (*Site, error) {
 	var site Site
 	var createdAt, updatedAt string
-	err := r.db.QueryRow(`SELECT name, url, admin_mail, timezone, created_at, updated_at FROM sites WHERE id = 1`).Scan(&site.Name, &site.URL, &site.AdminMail, &site.Timezone, &createdAt, &updatedAt)
+	var postsPerPage, commentsEnabled, commentsRequireModeration, commentsThreaded int
+	err := r.db.QueryRow(`SELECT name, url, admin_mail, timezone, description, keywords, posts_per_page, comments_enabled, comments_require_moderation, comments_threaded, created_at, updated_at FROM sites WHERE id = 1`).Scan(&site.Name, &site.URL, &site.AdminMail, &site.Timezone, &site.Description, &site.Keywords, &postsPerPage, &commentsEnabled, &commentsRequireModeration, &commentsThreaded, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read site: %w", err)
+	}
+	site.PostsPerPage = postsPerPage
+	site.CommentsEnabled = commentsEnabled != 0
+	site.CommentsRequireModeration = commentsRequireModeration != 0
+	site.CommentsThreaded = commentsThreaded != 0
+	if site.PostsPerPage < 1 || site.PostsPerPage > 50 {
+		site.PostsPerPage = 10
 	}
 	site.CreatedAt = parseTime(createdAt)
 	site.UpdatedAt = parseTime(updatedAt)
@@ -29,37 +37,24 @@ func (r *SQLiteRepository) Site() (*Site, error) {
 }
 
 func (r *SQLiteRepository) Admin() (*Admin, error) {
-	var admin Admin
-	var createdAt string
-	err := r.db.QueryRow(`SELECT username, password_hash, email, created_at FROM admins WHERE id = 1`).Scan(&admin.Username, &admin.PasswordHash, &admin.Email, &createdAt)
+	row := r.db.QueryRow(`SELECT id, username, password_hash, email, role, active, created_at, updated_at FROM users WHERE role = 'owner' ORDER BY created_at ASC, id ASC LIMIT 1`)
+	admin, err := scanUser(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read admin: %w", err)
+		return nil, fmt.Errorf("read owner: %w", err)
 	}
-	admin.CreatedAt = parseTime(createdAt)
 	return &admin, nil
 }
 
 func (r *SQLiteRepository) UpdateAdmin(admin Admin) error {
-	tx, err := r.db.Begin()
+	result, err := r.db.Exec(`UPDATE users SET password_hash = ?, email = ?, updated_at = ? WHERE role = 'owner' AND username = ?`, admin.PasswordHash, admin.Email, formatTime(time.Now().UTC()), admin.Username)
 	if err != nil {
-		return fmt.Errorf("start administrator update: %w", err)
-	}
-	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE admins SET password_hash = ?, email = ? WHERE id = 1`, admin.PasswordHash, admin.Email)
-	if err != nil {
-		return fmt.Errorf("update administrator: %w", err)
+		return fmt.Errorf("update owner: %w", err)
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return ErrNotFound
-	}
-	if _, err := tx.Exec(`UPDATE users SET password_hash = ?, email = ?, updated_at = ? WHERE username = ?`, admin.PasswordHash, admin.Email, formatTime(time.Now().UTC()), admin.Username); err != nil {
-		return fmt.Errorf("update administrator user: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit administrator update: %w", err)
 	}
 	return nil
 }
@@ -167,9 +162,6 @@ func (r *SQLiteRepository) Setup(site Site, admin Admin) error {
 	if _, err := tx.Exec(`INSERT INTO sites(id, name, url, admin_mail, timezone, created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?)`, site.Name, site.URL, site.AdminMail, site.Timezone, formatTime(site.CreatedAt), formatTime(site.UpdatedAt)); err != nil {
 		return fmt.Errorf("save site: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO admins(id, username, password_hash, email, created_at) VALUES (1, ?, ?, ?, ?)`, admin.Username, admin.PasswordHash, admin.Email, formatTime(admin.CreatedAt)); err != nil {
-		return fmt.Errorf("save admin: %w", err)
-	}
 	if _, err := tx.Exec(`INSERT INTO users(id, username, password_hash, email, role, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, admin.ID, admin.Username, admin.PasswordHash, admin.Email, admin.Role, boolToInt(admin.Active), formatTime(admin.CreatedAt), formatTime(admin.UpdatedAt)); err != nil {
 		return fmt.Errorf("save owner user: %w", err)
 	}
@@ -186,7 +178,7 @@ func (r *SQLiteRepository) UpdateSite(site Site) error {
 	}
 	site.CreatedAt = current.CreatedAt
 	site.UpdatedAt = time.Now().UTC()
-	result, err := r.db.Exec(`UPDATE sites SET name = ?, url = ?, admin_mail = ?, timezone = ?, updated_at = ? WHERE id = 1`, site.Name, site.URL, site.AdminMail, site.Timezone, formatTime(site.UpdatedAt))
+	result, err := r.db.Exec(`UPDATE sites SET name = ?, url = ?, admin_mail = ?, timezone = ?, description = ?, keywords = ?, posts_per_page = ?, comments_enabled = ?, comments_require_moderation = ?, comments_threaded = ?, updated_at = ? WHERE id = 1`, site.Name, site.URL, site.AdminMail, site.Timezone, site.Description, site.Keywords, site.PostsPerPage, boolToInt(site.CommentsEnabled), boolToInt(site.CommentsRequireModeration), boolToInt(site.CommentsThreaded), formatTime(site.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("update site: %w", err)
 	}

@@ -13,16 +13,39 @@ import (
 )
 
 func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
-	page, pageSize := pagination(r)
+	page, pageSize := s.readingPage(r)
 	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
-	posts, err := s.app.ListPostsByTerms(r.URL.Query().Get("q"), category, tag, s.canEditContent(r), page, pageSize)
+	posts, err := s.app.ListPostsByTerms(r.URL.Query().Get("q"), category, tag, r.URL.Query().Get("month"), r.URL.Query().Get("order"), s.canEditContent(r), page, pageSize)
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, publicPostPage(posts))
+}
+
+func (s *Server) listArchive(w http.ResponseWriter, _ *http.Request) {
+	items, err := s.app.MonthArchive()
+	if err != nil {
+		status, code := serviceError(err)
+		writeError(w, status, code, err.Error())
+		return
+	}
+	if items == nil {
+		items = []store.MonthCount{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listRecentComments(w http.ResponseWriter, r *http.Request) {
+	page, pageSize := pagination(r)
+	comments, err := s.app.RecentApprovedComments(page, pageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read recent comments")
+		return
+	}
+	writeJSON(w, http.StatusOK, publicCommentPage(comments, false))
 }
 
 func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +154,12 @@ func (s *Server) getPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read post")
 		return
 	}
-	writeJSON(w, http.StatusOK, publicPost(post))
+	previous, next, err := s.app.PublishedNeighbors(post)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read neighboring posts")
+		return
+	}
+	writeJSON(w, http.StatusOK, publicPostWithNeighbors(post, previous, next))
 }
 
 func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +193,9 @@ func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
 type commentRequest struct {
 	AuthorName  string `json:"authorName"`
 	AuthorEmail string `json:"authorEmail"`
+	AuthorURL   string `json:"authorUrl"`
 	Content     string `json:"content"`
+	ParentID    string `json:"parentId"`
 }
 
 func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
@@ -177,15 +207,21 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 	comment, err := s.app.CreateComment(r.PathValue("slug"), service.CommentInput{
 		AuthorName:  input.AuthorName,
 		AuthorEmail: input.AuthorEmail,
+		AuthorURL:   input.AuthorURL,
 		Content:     input.Content,
+		ParentID:    input.ParentID,
 	})
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
 		return
 	}
-	s.recordAudit(r, "comment.created", "comment", comment.ID, map[string]string{"postId": comment.PostID})
-	writeJSON(w, http.StatusAccepted, publicComment(comment, false))
+	s.recordAudit(r, "comment.created", "comment", comment.ID, map[string]string{"postId": comment.PostID, "status": comment.Status, "parentId": comment.ParentID})
+	statusCode := http.StatusAccepted
+	if comment.Status == "approved" {
+		statusCode = http.StatusCreated
+	}
+	writeJSON(w, statusCode, publicComment(comment, false))
 }
 
 func (s *Server) listAllComments(w http.ResponseWriter, r *http.Request) {
@@ -423,7 +459,7 @@ func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	created, err := s.app.CreatePost(input.post())
+	created, err := s.app.CreatePost(applyAllowComment(input.post(), input, true))
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
@@ -451,7 +487,7 @@ func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	updated, err := s.app.UpdatePost(post.ID, input.post())
+	updated, err := s.app.UpdatePost(post.ID, applyAllowComment(input.post(), input, post.AllowComment))
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())

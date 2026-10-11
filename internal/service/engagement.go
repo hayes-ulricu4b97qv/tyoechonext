@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,6 +21,21 @@ func (s *Service) ListComments(postKey string, includePending bool, page, pageSi
 	})
 }
 
+func (s *Service) RecentApprovedComments(page, pageSize int) (store.CommentPage, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	return s.repo.ListComments(store.CommentQuery{
+		Status:             "approved",
+		PublishedPostsOnly: true,
+		Page:               page,
+		PageSize:           pageSize,
+	})
+}
+
 func (s *Service) ListAllComments(status string, page, pageSize int) (store.CommentPage, error) {
 	if status != "" && !validCommentStatus(status) {
 		return store.CommentPage{}, fmt.Errorf("%w: status must be pending, approved or spam", ErrValidation)
@@ -32,25 +48,31 @@ func (s *Service) CreateComment(postKey string, input CommentInput) (store.Comme
 	if err != nil {
 		return store.Comment{}, err
 	}
-	name := strings.TrimSpace(input.AuthorName)
-	email := strings.TrimSpace(input.AuthorEmail)
-	content := strings.TrimSpace(input.Content)
-	if runeLength(name) < 1 || runeLength(name) > 80 {
-		return store.Comment{}, fmt.Errorf("%w: authorName must be between 1 and 80 characters", ErrValidation)
+	site, err := s.repo.Site()
+	if err != nil {
+		return store.Comment{}, err
 	}
-	if email != "" && !validEmail(email) {
-		return store.Comment{}, fmt.Errorf("%w: authorEmail must be a valid email address", ErrValidation)
+	var parent *store.Comment
+	parentDepth := 0
+	if parentID := strings.TrimSpace(input.ParentID); parentID != "" {
+		found, err := s.repo.Comment(parentID)
+		if errors.Is(err, store.ErrNotFound) {
+			return store.Comment{}, fmt.Errorf("%w: parent comment was not found", ErrValidation)
+		}
+		if err != nil {
+			return store.Comment{}, err
+		}
+		parent = &found
+		parentDepth, err = s.commentDepth(found)
+		if err != nil {
+			return store.Comment{}, err
+		}
 	}
-	if runeLength(content) < 1 || runeLength(content) > 4000 {
-		return store.Comment{}, fmt.Errorf("%w: content must be between 1 and 4000 characters", ErrValidation)
+	comment, err := buildComment(*site, post, input, parent, parentDepth)
+	if err != nil {
+		return store.Comment{}, err
 	}
-	return s.repo.SaveComment(store.Comment{
-		PostID:      post.ID,
-		AuthorName:  name,
-		AuthorEmail: email,
-		Content:     content,
-		Status:      "pending",
-	})
+	return s.repo.SaveComment(comment)
 }
 
 func (s *Service) ModerateComment(id, status string) (store.Comment, error) {

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { api, ApiError, postJSON, putJSON } from '../api'
-import type { AuditEvent, AuditPage, Site, Status, UserRecord } from '../types'
+import { getReading, updateReading } from '../api/settings'
+import type { AuditEvent, AuditPage, ReadingSettings, Site, Status, UserRecord } from '../types'
 
 const props = defineProps<{ status: Status }>()
 const initialized = props.status.initialized
@@ -25,11 +26,22 @@ const form = reactive({
   siteUrl: props.status.site?.url ?? window.location.origin,
   adminEmail: props.status.site?.adminMail ?? '',
   timezone: props.status.site?.timezone ?? 'Asia/Shanghai',
+  description: props.status.site?.description ?? '',
+  keywords: props.status.site?.keywords ?? '',
   adminUsername: '',
   adminPassword: '',
 })
 const accountForm = reactive({ email: props.status.site?.adminMail ?? '', currentPassword: '', newPassword: '' })
 const userForm = reactive({ username: '', email: '', password: '', role: 'editor' as 'editor' | 'moderator' })
+const readingForm = reactive<ReadingSettings>({
+  postsPerPage: props.status.reading?.postsPerPage ?? 10,
+  commentsEnabled: props.status.reading?.commentsEnabled ?? true,
+  commentsRequireModeration: props.status.reading?.commentsRequireModeration ?? true,
+  commentsThreaded: props.status.reading?.commentsThreaded ?? true,
+})
+const readingSubmitting = ref(false)
+const readingMessage = ref('')
+const readingError = ref('')
 
 async function loadAccount() {
   if (!initialized) return
@@ -40,6 +52,7 @@ async function loadAccount() {
     if (canManageUsers.value) {
       void loadUsers()
       void loadAudit()
+      void loadReading()
     }
   } catch (reason) {
     if (!(reason instanceof ApiError && reason.status === 401)) {
@@ -58,6 +71,28 @@ async function loadAudit() {
     auditError.value = reason instanceof ApiError ? reason.message : '无法读取审计记录'
   } finally {
     auditLoading.value = false
+  }
+}
+
+async function loadReading() {
+  try {
+    Object.assign(readingForm, await getReading())
+  } catch (reason) {
+    readingError.value = reason instanceof ApiError ? reason.message : '无法读取阅读设置'
+  }
+}
+
+async function saveReading() {
+  readingSubmitting.value = true
+  readingMessage.value = ''
+  readingError.value = ''
+  try {
+    Object.assign(readingForm, await updateReading({ ...readingForm }))
+    readingMessage.value = '阅读与评论设置已保存'
+  } catch (reason) {
+    readingError.value = reason instanceof ApiError ? reason.message : '保存阅读设置失败'
+  } finally {
+    readingSubmitting.value = false
   }
 }
 
@@ -89,6 +124,8 @@ async function submit() {
       url: form.siteUrl,
       adminMail: form.adminEmail,
       timezone: form.timezone,
+      description: form.description,
+      keywords: form.keywords,
     })
     message.value = '设置已保存'
   } catch (reason) {
@@ -166,7 +203,7 @@ onMounted(() => {
       <div class="intro-copy">
         <p class="eyebrow">FIRST RUN</p>
         <h1>{{ initialized ? '站点设置' : '把你的站点准备好' }}</h1>
-        <p>{{ initialized ? '集中管理站点信息，后续模块会在这里逐步接入。' : '新架构已经就绪。完成一次设置后，管理端和用户端就会开放。' }}</p>
+        <p>{{ initialized ? '站点信息、阅读和评论规则都由后端校验后保存。' : '新架构已经就绪。完成一次设置后，管理端和用户端就会开放。' }}</p>
       </div>
       <div class="intro-foot"><span class="dot"></span> Go API · Vue 3 · TypeScript</div>
     </section>
@@ -181,6 +218,10 @@ onMounted(() => {
       <form v-if="!initialized || canManageUsers" @submit.prevent="submit">
         <label>站点名称<input v-model="form.siteName" required maxlength="80" placeholder="例如：我的新博客" /></label>
         <label>站点地址<input v-model="form.siteUrl" required type="url" placeholder="https://example.com" /></label>
+        <template v-if="initialized">
+          <label>站点描述<textarea v-model="form.description" maxlength="2000" rows="3" placeholder="用一两句话介绍这个站点"></textarea></label>
+          <label>关键词<input v-model="form.keywords" maxlength="500" placeholder="用逗号分隔，例如：笔记, Go" /></label>
+        </template>
         <div class="form-grid">
           <label>管理员邮箱<input v-model="form.adminEmail" required type="email" placeholder="you@example.com" /></label>
           <label>时区<select v-model="form.timezone"><option>Asia/Shanghai</option><option>Asia/Tokyo</option><option>UTC</option><option>America/Los_Angeles</option></select></label>
@@ -205,6 +246,18 @@ onMounted(() => {
           <p v-if="accountError" class="form-error">{{ accountError }}</p>
           <p v-if="accountMessage" class="form-success">{{ accountMessage }}</p>
           <button class="button button-dark button-wide" :disabled="accountSubmitting">{{ accountSubmitting ? '保存中…' : '保存账户信息' }}</button>
+        </form>
+      </section>
+      <section v-if="initialized && canManageUsers" class="settings-reading">
+        <div class="form-divider"><span>阅读与评论</span></div>
+        <form @submit.prevent="saveReading">
+          <label>每页文章数<input v-model.number="readingForm.postsPerPage" required type="number" min="1" max="50" /></label>
+          <label class="check-row"><input v-model="readingForm.commentsEnabled" type="checkbox" />开放评论</label>
+          <label class="check-row"><input v-model="readingForm.commentsRequireModeration" type="checkbox" />新评论需要审核</label>
+          <label class="check-row"><input v-model="readingForm.commentsThreaded" type="checkbox" />允许回复评论，最多三层</label>
+          <p v-if="readingError" class="form-error">{{ readingError }}</p>
+          <p v-if="readingMessage" class="form-success">{{ readingMessage }}</p>
+          <button class="button button-dark button-wide" :disabled="readingSubmitting">{{ readingSubmitting ? '保存中…' : '保存阅读与评论设置' }}</button>
         </form>
       </section>
       <section v-if="initialized && canManageUsers" class="settings-users">

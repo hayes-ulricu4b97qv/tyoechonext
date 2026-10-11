@@ -1,10 +1,4 @@
 .git
-admin/
-install/
-tools/
-usr/
-var/
-*.php
 data/
 web/node_modules/
 web/dist/

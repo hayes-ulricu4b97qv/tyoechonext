@@ -9,12 +9,18 @@ import (
 var ErrNotFound = errors.New("record not found")
 
 type Site struct {
-	Name      string    `json:"name"`
-	URL       string    `json:"url"`
-	AdminMail string    `json:"adminMail"`
-	Timezone  string    `json:"timezone"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Name                      string    `json:"name"`
+	URL                       string    `json:"url"`
+	AdminMail                 string    `json:"adminMail"`
+	Timezone                  string    `json:"timezone"`
+	Description               string    `json:"description"`
+	Keywords                  string    `json:"keywords"`
+	PostsPerPage              int       `json:"postsPerPage"`
+	CommentsEnabled           bool      `json:"commentsEnabled"`
+	CommentsRequireModeration bool      `json:"commentsRequireModeration"`
+	CommentsThreaded          bool      `json:"commentsThreaded"`
+	CreatedAt                 time.Time `json:"createdAt"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
 type User struct {
@@ -28,20 +34,21 @@ type User struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
-// Admin remains an alias while the legacy admins table is migrated to users.
+// Admin is the owner account stored in the users table.
 type Admin = User
 
 type Post struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Slug        string    `json:"slug"`
-	Excerpt     string    `json:"excerpt"`
-	Content     string    `json:"content"`
-	Status      string    `json:"status"`
-	Categories  []Term    `json:"categories,omitempty"`
-	Tags        []Term    `json:"tags,omitempty"`
-	PublishedAt time.Time `json:"publishedAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Slug         string    `json:"slug"`
+	Excerpt      string    `json:"excerpt"`
+	Content      string    `json:"content"`
+	Status       string    `json:"status"`
+	AllowComment bool      `json:"allowComment"`
+	Categories   []Term    `json:"categories,omitempty"`
+	Tags         []Term    `json:"tags,omitempty"`
+	PublishedAt  time.Time `json:"publishedAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type Page struct {
@@ -83,9 +90,12 @@ type TermPage struct {
 type Comment struct {
 	ID          string    `json:"id"`
 	PostID      string    `json:"postId"`
+	ParentID    string    `json:"parentId,omitempty"`
 	PostTitle   string    `json:"postTitle,omitempty"`
+	PostSlug    string    `json:"postSlug,omitempty"`
 	AuthorName  string    `json:"authorName"`
 	AuthorEmail string    `json:"authorEmail,omitempty"`
+	AuthorURL   string    `json:"authorUrl,omitempty"`
 	Content     string    `json:"content"`
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -116,8 +126,16 @@ type PostQuery struct {
 	TermSlug      string
 	CategorySlug  string
 	TagSlug       string
+	Order         string
+	RestrictIDs   bool
+	IDs           []string
 	Page          int
 	PageSize      int
+}
+
+type MonthCount struct {
+	Month string `json:"month"`
+	Count int    `json:"count"`
 }
 
 type PostPage struct {
@@ -142,11 +160,12 @@ type PagePage struct {
 }
 
 type CommentQuery struct {
-	PostID         string
-	Status         string
-	IncludePending bool
-	Page           int
-	PageSize       int
+	PostID             string
+	Status             string
+	IncludePending     bool
+	PublishedPostsOnly bool
+	Page               int
+	PageSize           int
 }
 
 type CommentPage struct {
@@ -207,6 +226,7 @@ type Repository interface {
 	UpdateSite(Site) error
 	Posts() ([]Post, error)
 	SearchPosts(PostQuery) (PostPage, error)
+	ListPublishedMeta() ([]Post, error)
 	Post(string) (Post, error)
 	PostBySlug(string) (Post, error)
 	SavePost(Post) (Post, error)

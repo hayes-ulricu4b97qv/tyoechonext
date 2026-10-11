@@ -26,13 +26,17 @@ func (r *SQLiteRepository) ListComments(query CommentQuery) (CommentPage, error)
 	} else if !query.IncludePending {
 		where += " AND c.status = 'approved'"
 	}
+	if query.PublishedPostsOnly {
+		where += " AND p.status = 'published'"
+	}
+	from := "comments c JOIN posts p ON p.id = c.post_id"
 	var total int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM comments c WHERE `+where, args...).Scan(&total); err != nil {
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM `+from+` WHERE `+where, args...).Scan(&total); err != nil {
 		return CommentPage{}, fmt.Errorf("count comments: %w", err)
 	}
 	offset := (query.Page - 1) * query.PageSize
-	rows, err := r.db.Query(`SELECT c.id, c.post_id, p.title, c.author_name, c.author_email, c.content, c.status, c.created_at, c.updated_at
-		FROM comments c JOIN posts p ON p.id = c.post_id WHERE `+where+` ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
+	rows, err := r.db.Query(`SELECT c.id, c.post_id, p.title, p.slug, c.author_name, c.author_email, c.author_url, c.content, c.status, c.parent_id, c.created_at, c.updated_at
+		FROM `+from+` WHERE `+where+` ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
 	if err != nil {
 		return CommentPage{}, fmt.Errorf("list comments: %w", err)
 	}
@@ -52,7 +56,7 @@ func (r *SQLiteRepository) ListComments(query CommentQuery) (CommentPage, error)
 }
 
 func (r *SQLiteRepository) Comment(id string) (Comment, error) {
-	row := r.db.QueryRow(`SELECT c.id, c.post_id, p.title, c.author_name, c.author_email, c.content, c.status, c.created_at, c.updated_at
+	row := r.db.QueryRow(`SELECT c.id, c.post_id, p.title, p.slug, c.author_name, c.author_email, c.author_url, c.content, c.status, c.parent_id, c.created_at, c.updated_at
 		FROM comments c JOIN posts p ON p.id = c.post_id WHERE c.id = ?`, id)
 	comment, err := scanComment(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -75,11 +79,11 @@ func (r *SQLiteRepository) SaveComment(comment Comment) (Comment, error) {
 		comment.CreatedAt = time.Now().UTC()
 	}
 	comment.UpdatedAt = time.Now().UTC()
-	_, err := r.db.Exec(`INSERT INTO comments(id, post_id, author_name, author_email, content, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET post_id = excluded.post_id, author_name = excluded.author_name, author_email = excluded.author_email,
-		content = excluded.content, status = excluded.status, updated_at = excluded.updated_at`,
-		comment.ID, comment.PostID, comment.AuthorName, comment.AuthorEmail, comment.Content, comment.Status, formatTime(comment.CreatedAt), formatTime(comment.UpdatedAt))
+	_, err := r.db.Exec(`INSERT INTO comments(id, post_id, parent_id, author_name, author_email, author_url, content, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET post_id = excluded.post_id, parent_id = excluded.parent_id, author_name = excluded.author_name, author_email = excluded.author_email,
+		author_url = excluded.author_url, content = excluded.content, status = excluded.status, updated_at = excluded.updated_at`,
+		comment.ID, comment.PostID, comment.ParentID, comment.AuthorName, comment.AuthorEmail, comment.AuthorURL, comment.Content, comment.Status, formatTime(comment.CreatedAt), formatTime(comment.UpdatedAt))
 	if err != nil {
 		return Comment{}, fmt.Errorf("save comment: %w", err)
 	}

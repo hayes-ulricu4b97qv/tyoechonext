@@ -22,19 +22,6 @@ func (s *Service) ListPostsByTerm(search, kind, slug string, includeDrafts bool,
 	return s.repo.SearchPosts(store.PostQuery{Search: search, IncludeDrafts: includeDrafts, TermKind: kind, TermSlug: slug, Page: page, PageSize: pageSize})
 }
 
-func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug string, includeDrafts bool, page, pageSize int) (store.PostPage, error) {
-	categorySlug = strings.TrimSpace(categorySlug)
-	tagSlug = strings.TrimSpace(tagSlug)
-	return s.repo.SearchPosts(store.PostQuery{
-		Search:        search,
-		IncludeDrafts: includeDrafts,
-		CategorySlug:  categorySlug,
-		TagSlug:       tagSlug,
-		Page:          page,
-		PageSize:      pageSize,
-	})
-}
-
 func (s *Service) ListTerms(kind, search string, includeDrafts bool, page, pageSize int) (store.TermPage, error) {
 	kind = strings.TrimSpace(kind)
 	if kind != "" && kind != "category" && kind != "tag" {

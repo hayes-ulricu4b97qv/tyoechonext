@@ -5,7 +5,11 @@ import (
 	"regexp"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
+	_ "time/tzdata"
 )
+
+// MaxContentRunes is the documented maximum length of a post or page body.
+const MaxContentRunes = 500000
 
 var (
 	ErrValidation         = errors.New("validation error")
@@ -33,7 +37,9 @@ type AccountInput struct {
 type CommentInput struct {
 	AuthorName  string
 	AuthorEmail string
+	AuthorURL   string
 	Content     string
+	ParentID    string
 }
 
 type UserInput struct {

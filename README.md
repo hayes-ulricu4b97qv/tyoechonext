@@ -1,6 +1,6 @@
 # Typecho Next
 
-Typecho Next is the new runtime for this repository: a Go API with a small Vue 3 + TypeScript client. It deliberately starts a new architecture instead of keeping the old Typecho request model or plugin compatibility layer.
+Typecho Next is a Go API with a Vue 3 + TypeScript client.
 
 ## Product entry points
 
@@ -13,7 +13,7 @@ Typecho Next is the new runtime for this repository: a Go API with a small Vue 3
 - `/api/v1` — versioned JSON API
 - `/healthz` / `/readyz` — liveness and readiness checks
 
-The service redirects every page to `/setting` until the first administrator and site settings are created. Runtime data is stored in SQLite under `APP_DATA_DIR/app.db`; an existing `app.json` from the first migration step is imported automatically on first startup.
+The service redirects every page to `/setting` until setup creates the site and the owner account. Runtime data is stored in SQLite at `APP_DATA_DIR/app.db`. Opening a data directory creates that database and applies this application's schema, including column upgrades for databases it already created.
 
 ## Quick start
 
@@ -40,7 +40,7 @@ docker run --rm -p 8080:8080 -v typecho-data:/app/data typecho-next
 docker build --secret id=proxy_ca,src="$CODEX_PROXY_CERT" -t typecho-next .
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the module boundaries and the migration order. The original PHP implementation remains in the repository temporarily as a migration reference and is not used by the new server.
+See [docs/architecture.md](docs/architecture.md) for the module boundaries.
 
 ## Runtime requirements
 
@@ -49,9 +49,9 @@ See [docs/architecture.md](docs/architecture.md) for the module boundaries and t
 * GCC or another C toolchain for local SQLite builds (the Docker image includes it)
 * A writable `APP_DATA_DIR` (the container uses `/app/data`)
 
-SQLite is the default single-node persistence adapter. The repository interface keeps the API boundary ready for a PostgreSQL adapter when multi-node deployment is needed.
+SQLite is the single-node persistence adapter. The repository interface keeps the API boundary ready for another adapter when multi-node deployment is needed.
 
-Article listing accepts `q`, `page`, and `pageSize`. Sessions are persisted in SQLite with only a SHA-256 token hash stored server side; the session record now references the migrated `users` entity and backfills older username-based records.
+Article listing accepts `q`, `page`, and `pageSize`. Sessions are persisted in SQLite with only a SHA-256 token hash stored server side. Each session references `users.id`, so a login remains valid for a later request against the same database.
 Search terms are treated literally, including `%` and `_`.
 
 Posts support comma-separated categories and tags. The Go service stores them in normalized taxonomy tables and exposes published term counts through `GET /api/v1/content/terms`. Content editors can manage terms with `POST/PUT/DELETE /api/v1/content/terms`.
@@ -68,14 +68,14 @@ Go directly serves `/feed.xml`, `/sitemap.xml`, and `/robots.txt` from published
 Owner accounts can inspect management history through `GET /api/v1/audit`; successful content, media, comment, user, account, and site changes record the actor and resource.
 Write requests use a double-submit CSRF token; the Vue API client copies the token from the non-HttpOnly cookie into `X-CSRF-Token`. Initial setup and login are the only unauthenticated write entry points that do not require a prior token.
 
-文章详情支持评论：新评论先进入待审核状态，管理员在 `/admin` 审核后才会公开显示。
+文章详情支持评论：默认先进入待审核状态，管理员在 `/admin` 审核后才会公开显示。所有者可以在 `/setting` 调整每页文章数、关闭评论、改为直接公开，或允许最多三层回复。单篇文章也可以关闭评论。
 
 管理员也可以在 `/admin` 上传 JPEG、PNG、GIF 或 WebP 图片，文件保存在 `APP_MEDIA_DIR`，单文件上限为 10 MB。
 
 所有者可以在 `/setting` 创建编辑者和审核员账户；权限由 Go API 校验，停用账户会立即阻止后续请求。更换所有者密码时会保留当前会话并撤销其他会话；工作人员被停用或删除时会清理其会话。
 所有者也可以在用户列表中为工作人员重置密码，旧会话会立即失效。
 
-管理员登录后可在 `/setting` 更新账户邮箱；提交当前密码和新密码即可轮换管理员密码。
+管理员登录后可在 `/setting` 更新账户邮箱；提交当前密码和新密码即可轮换管理员密码。账户变更写入 `users` 表中的所有者记录。
 
 ## Contributing
 

@@ -9,7 +9,7 @@ import (
 )
 
 func (r *SQLiteRepository) Posts() ([]Post, error) {
-	rows, err := r.db.Query(`SELECT id, title, slug, excerpt, content, status, published_at, updated_at FROM posts ORDER BY updated_at DESC, id DESC`)
+	rows, err := r.db.Query(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at FROM posts ORDER BY updated_at DESC, id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list posts: %w", err)
 	}
@@ -75,12 +75,24 @@ func (r *SQLiteRepository) SearchPosts(query PostQuery) (PostPage, error) {
 		pattern := containsPattern(search)
 		args = append(args, pattern, pattern, pattern, pattern)
 	}
+	if query.RestrictIDs {
+		if len(query.IDs) == 0 {
+			return PostPage{Items: []Post{}, Total: 0, Page: query.Page, PageSize: query.PageSize}, nil
+		}
+		clause, idArgs := idInClause(query.IDs)
+		where += " AND " + clause
+		args = append(args, idArgs...)
+	}
 	var total int
 	if err := r.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE `+where, args...).Scan(&total); err != nil {
 		return PostPage{}, fmt.Errorf("count posts: %w", err)
 	}
+	orderBy := "updated_at DESC, id DESC"
+	if query.Order == "published" {
+		orderBy = "published_at DESC, id DESC"
+	}
 	offset := (query.Page - 1) * query.PageSize
-	rows, err := r.db.Query(`SELECT id, title, slug, excerpt, content, status, published_at, updated_at FROM posts WHERE `+where+` ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
+	rows, err := r.db.Query(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at FROM posts WHERE `+where+` ORDER BY `+orderBy+` LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
 	if err != nil {
 		return PostPage{}, fmt.Errorf("search posts: %w", err)
 	}
@@ -107,6 +119,51 @@ func (r *SQLiteRepository) SearchPosts(query PostQuery) (PostPage, error) {
 	return PostPage{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }
 
+func (r *SQLiteRepository) ListPublishedMeta() ([]Post, error) {
+	rows, err := r.db.Query(`SELECT id, title, slug, published_at FROM posts WHERE status = 'published' AND published_at IS NOT NULL AND published_at != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("list published posts: %w", err)
+	}
+	defer rows.Close()
+	posts := make([]Post, 0)
+	for rows.Next() {
+		var post Post
+		var publishedAt string
+		if err := rows.Scan(&post.ID, &post.Title, &post.Slug, &publishedAt); err != nil {
+			return nil, fmt.Errorf("scan published post: %w", err)
+		}
+		post.Status = "published"
+		post.PublishedAt = parseTime(publishedAt)
+		if post.PublishedAt.IsZero() {
+			continue
+		}
+		posts = append(posts, post)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate published posts: %w", err)
+	}
+	return posts, nil
+}
+
+func idInClause(ids []string) (string, []any) {
+	parts := make([]string, 0, (len(ids)+199)/200)
+	args := make([]any, 0, len(ids))
+	for start := 0; start < len(ids); start += 200 {
+		end := start + 200
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := make([]string, len(chunk))
+		for index, id := range chunk {
+			placeholders[index] = "?"
+			args = append(args, id)
+		}
+		parts = append(parts, "id IN ("+strings.Join(placeholders, ",")+")")
+	}
+	return "(" + strings.Join(parts, " OR ") + ")", args
+}
+
 func (r *SQLiteRepository) Post(id string) (Post, error) {
 	return r.postBy(`id = ?`, id)
 }
@@ -116,7 +173,7 @@ func (r *SQLiteRepository) PostBySlug(slug string) (Post, error) {
 }
 
 func (r *SQLiteRepository) postBy(where, value string) (Post, error) {
-	row := r.db.QueryRow(`SELECT id, title, slug, excerpt, content, status, published_at, updated_at FROM posts WHERE `+where, value)
+	row := r.db.QueryRow(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at FROM posts WHERE `+where, value)
 	post, err := scanPost(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Post{}, ErrNotFound
@@ -154,10 +211,10 @@ func (r *SQLiteRepository) SavePost(post Post) (Post, error) {
 		return Post{}, fmt.Errorf("start post save transaction: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO posts(id, title, slug, excerpt, content, status, published_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET title = excluded.title, slug = excluded.slug, excerpt = excluded.excerpt, content = excluded.content, status = excluded.status, published_at = excluded.published_at, updated_at = excluded.updated_at`,
-		post.ID, post.Title, post.Slug, post.Excerpt, post.Content, post.Status, publishedAt, formatTime(post.UpdatedAt)); err != nil {
+	if _, err := tx.Exec(`INSERT INTO posts(id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET title = excluded.title, slug = excluded.slug, excerpt = excluded.excerpt, content = excluded.content, status = excluded.status, allow_comment = excluded.allow_comment, published_at = excluded.published_at, updated_at = excluded.updated_at`,
+		post.ID, post.Title, post.Slug, post.Excerpt, post.Content, post.Status, boolToInt(post.AllowComment), publishedAt, formatTime(post.UpdatedAt)); err != nil {
 		return Post{}, fmt.Errorf("save post: %w", err)
 	}
 	if err := r.savePostTerms(tx, post.ID, post.Categories, post.Tags); err != nil {

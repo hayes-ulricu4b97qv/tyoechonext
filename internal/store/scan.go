@@ -17,11 +17,13 @@ type scanner interface {
 
 func scanPost(row scanner) (Post, error) {
 	var post Post
+	var allowComment int
 	var publishedAt, updatedAt sql.NullString
-	err := row.Scan(&post.ID, &post.Title, &post.Slug, &post.Excerpt, &post.Content, &post.Status, &publishedAt, &updatedAt)
+	err := row.Scan(&post.ID, &post.Title, &post.Slug, &post.Excerpt, &post.Content, &post.Status, &allowComment, &publishedAt, &updatedAt)
 	if err != nil {
 		return Post{}, err
 	}
+	post.AllowComment = allowComment != 0
 	if publishedAt.Valid {
 		post.PublishedAt = parseTime(publishedAt.String)
 	}
@@ -73,7 +75,7 @@ func scanUser(row scanner) (User, error) {
 func scanComment(row scanner) (Comment, error) {
 	var comment Comment
 	var createdAt, updatedAt string
-	if err := row.Scan(&comment.ID, &comment.PostID, &comment.PostTitle, &comment.AuthorName, &comment.AuthorEmail, &comment.Content, &comment.Status, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&comment.ID, &comment.PostID, &comment.PostTitle, &comment.PostSlug, &comment.AuthorName, &comment.AuthorEmail, &comment.AuthorURL, &comment.Content, &comment.Status, &comment.ParentID, &createdAt, &updatedAt); err != nil {
 		return Comment{}, err
 	}
 	comment.CreatedAt = parseTime(createdAt)

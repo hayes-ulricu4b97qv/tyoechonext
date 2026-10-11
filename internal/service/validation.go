@@ -114,8 +114,8 @@ func validateContentFields(title, slug, excerpt, content string) error {
 	if runeLength(excerpt) > 500 {
 		return fmt.Errorf("%w: excerpt must be at most 500 characters", ErrValidation)
 	}
-	if runeLength(content) > 500000 {
-		return fmt.Errorf("%w: content must be at most 500000 characters", ErrValidation)
+	if runeLength(content) > MaxContentRunes {
+		return fmt.Errorf("%w: content must be at most %d characters", ErrValidation, MaxContentRunes)
 	}
 	return nil
 }

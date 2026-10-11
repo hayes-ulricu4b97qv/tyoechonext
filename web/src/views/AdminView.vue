@@ -14,7 +14,7 @@ import {
   listPendingComments,
   listPosts,
   listTerms,
-  moderateComment,
+  moderateComment as moderateCommentRequest,
   savePage as savePageRequest,
   savePost,
   uploadMedia as uploadMediaFile,
@@ -37,7 +37,7 @@ const loginForm = reactive({ username: '', password: '' })
 const loginError = ref('')
 const loginLoading = ref(false)
 const showEditor = ref(false)
-const editor = reactive({ title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', status: 'draft' as 'draft' | 'published' })
+const editor = reactive({ title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft' as 'draft' | 'published' })
 const editorError = ref('')
 const editingId = ref<string | null>(null)
 const showPageEditor = ref(false)
@@ -115,6 +115,7 @@ function startEdit(post: Post) {
     content: post.content,
     categories: post.categories?.map((term) => term.name).join(', ') ?? '',
     tags: post.tags?.map((term) => term.name).join(', ') ?? '',
+    allowComment: post.allowComment !== false,
     status: post.status,
   })
   editorError.value = ''
@@ -124,7 +125,7 @@ function startEdit(post: Post) {
 function cancelEditor() {
   editingId.value = null
   showEditor.value = false
-  Object.assign(editor, { title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', status: 'draft' })
+  Object.assign(editor, { title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft' })
   editorError.value = ''
 }
 
@@ -139,8 +140,8 @@ async function publish() {
       status: editor.status,
       categories: splitTerms(editor.categories),
       tags: splitTerms(editor.tags),
+      allowComment: editor.allowComment,
     }
-    if (editingId.value) {
     await savePost(editingId.value, payload)
     cancelEditor()
     await loadDashboard()
@@ -167,7 +168,6 @@ async function savePage() {
   pageEditorError.value = ''
   try {
     const payload = { title: pageEditor.title, slug: pageEditor.slug, excerpt: pageEditor.excerpt, content: pageEditor.content, status: pageEditor.status }
-    if (editingPageId.value) {
     await savePageRequest(editingPageId.value, payload)
     cancelPageEditor()
     await loadDashboard()
@@ -212,7 +212,7 @@ async function moderateComment(comment: Comment, status: 'approved' | 'spam') {
   commentActionId.value = comment.id
   commentError.value = ''
   try {
-    await moderateComment(comment.id, status)
+    await moderateCommentRequest(comment.id, status)
     await loadDashboard()
   } catch (reason) {
     commentError.value = reason instanceof ApiError ? reason.message : '更新评论失败'
@@ -347,6 +347,7 @@ onMounted(async () => {
                 <div class="comment-row-meta"><strong>{{ comment.authorName }}</strong><span v-if="comment.authorEmail">{{ comment.authorEmail }}</span><time>{{ new Date(comment.createdAt).toLocaleDateString('zh-CN') }}</time></div>
                 <p>{{ comment.content }}</p>
                 <small v-if="comment.postTitle">文章：{{ comment.postTitle }}</small>
+                <small v-if="comment.parentId">这是一条回复</small>
               </div>
               <div class="row-actions"><button class="text-button" :disabled="commentActionId === comment.id" @click="moderateComment(comment, 'approved')">通过</button><button class="text-button danger" :disabled="commentActionId === comment.id" @click="moderateComment(comment, 'spam')">垃圾</button><button class="text-button danger" :disabled="commentActionId === comment.id" @click="removeComment(comment)">删除</button></div>
             </article>
@@ -406,7 +407,7 @@ onMounted(async () => {
             <textarea v-model="editor.excerpt" rows="2" placeholder="一句话摘要（可选）"></textarea>
             <textarea v-model="editor.content" rows="8" required placeholder="开始写作…"></textarea>
             <div class="form-grid"><label>分类<input v-model="editor.categories" placeholder="产品, 随笔" /></label><label>标签<input v-model="editor.tags" placeholder="Go, Vue, 重构" /></label></div>
-            <div class="editor-actions"><select v-model="editor.status"><option value="draft">保存为草稿</option><option value="published">立即发布</option></select><p v-if="editorError" class="form-error">{{ editorError }}</p><button class="button button-dark">{{ editingId ? '保存修改' : '保存文章' }}</button></div>
+            <div class="editor-actions"><label class="editor-check"><input v-model="editor.allowComment" type="checkbox" />允许评论</label><select v-model="editor.status"><option value="draft">保存为草稿</option><option value="published">立即发布</option></select><p v-if="editorError" class="form-error">{{ editorError }}</p><button class="button button-dark">{{ editingId ? '保存修改' : '保存文章' }}</button></div>
           </form>
           <div v-if="loading" class="empty-state">正在加载…</div>
           <div v-else-if="posts.length === 0" class="empty-state"><strong>开始你的第一篇文章</strong><span>文章会保存在新的内容服务中。</span></div>

@@ -27,8 +27,7 @@ func main() {
 	}
 
 	databasePath := filepath.Join(dataDir, "app.db")
-	legacyPath := filepath.Join(dataDir, "app.json")
-	repository, err := store.NewSQLiteRepository(databasePath, legacyPath)
+	repository, err := store.NewSQLiteRepository(databasePath)
 	if err != nil {
 		logger.Error("open repository", "error", err)
 		os.Exit(1)

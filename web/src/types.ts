@@ -3,12 +3,22 @@ export interface Site {
   url: string
   adminMail: string
   timezone: string
+  description: string
+  keywords: string
+}
+
+export interface ReadingSettings {
+  postsPerPage: number
+  commentsEnabled: boolean
+  commentsRequireModeration: boolean
+  commentsThreaded: boolean
 }
 
 export interface Status {
   initialized: boolean
   version: string
   site?: Site
+  reading?: ReadingSettings
 }
 
 export interface User {
@@ -28,6 +38,13 @@ export interface UserRecord {
   password?: string
 }
 
+export interface PostNeighbor {
+  id: string
+  title: string
+  slug: string
+  publishedAt?: string
+}
+
 export interface Post {
   id: string
   title: string
@@ -35,10 +52,18 @@ export interface Post {
   excerpt: string
   content: string
   status: 'draft' | 'published'
+  allowComment?: boolean
   categories?: Term[]
   tags?: Term[]
   publishedAt?: string
   updatedAt: string
+  previous?: PostNeighbor
+  next?: PostNeighbor
+}
+
+export interface MonthCount {
+  month: string
+  count: number
 }
 
 export interface Term {
@@ -84,9 +109,12 @@ export interface PagePage {
 export interface Comment {
   id: string
   postId?: string
+  parentId?: string
   postTitle?: string
+  postSlug?: string
   authorName: string
   authorEmail?: string
+  authorUrl?: string
   content: string
   status: 'pending' | 'approved' | 'spam'
   createdAt: string

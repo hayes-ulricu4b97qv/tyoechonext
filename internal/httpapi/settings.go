@@ -43,16 +43,18 @@ func (s *Server) updateSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Name      string `json:"name"`
-		URL       string `json:"url"`
-		AdminMail string `json:"adminMail"`
-		Timezone  string `json:"timezone"`
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		AdminMail   string `json:"adminMail"`
+		Timezone    string `json:"timezone"`
+		Description string `json:"description"`
+		Keywords    string `json:"keywords"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	updated, err := s.app.UpdateSite(store.Site{Name: input.Name, URL: input.URL, AdminMail: input.AdminMail, Timezone: input.Timezone})
+	updated, err := s.app.UpdateSite(store.Site{Name: input.Name, URL: input.URL, AdminMail: input.AdminMail, Timezone: input.Timezone, Description: input.Description, Keywords: input.Keywords})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
@@ -64,6 +66,60 @@ func (s *Server) updateSite(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(r, "site.updated", "site", "1", nil)
 	writeJSON(w, http.StatusOK, publicSite(updated))
+}
+
+func (s *Server) getReading(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOwner(w, r) {
+		return
+	}
+	site, err := s.app.Site()
+	if errors.Is(err, store.ErrNotFound) || site == nil {
+		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read reading settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, publicReading(site))
+}
+
+func (s *Server) updateReading(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOwner(w, r) {
+		return
+	}
+	var input struct {
+		PostsPerPage              int  `json:"postsPerPage"`
+		CommentsEnabled           bool `json:"commentsEnabled"`
+		CommentsRequireModeration bool `json:"commentsRequireModeration"`
+		CommentsThreaded          bool `json:"commentsThreaded"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	updated, err := s.app.UpdateReading(service.ReadingInput{
+		PostsPerPage:              input.PostsPerPage,
+		CommentsEnabled:           input.CommentsEnabled,
+		CommentsRequireModeration: input.CommentsRequireModeration,
+		CommentsThreaded:          input.CommentsThreaded,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
+			return
+		}
+		status, code := serviceError(err)
+		writeError(w, status, code, err.Error())
+		return
+	}
+	s.recordAudit(r, "site.reading_updated", "site", "1", map[string]string{
+		"postsPerPage":      strconv.Itoa(updated.PostsPerPage),
+		"commentsEnabled":   strconv.FormatBool(updated.CommentsEnabled),
+		"requireModeration": strconv.FormatBool(updated.CommentsRequireModeration),
+		"threaded":          strconv.FormatBool(updated.CommentsThreaded),
+	})
+	writeJSON(w, http.StatusOK, publicReading(updated))
 }
 
 type accountRequest struct {

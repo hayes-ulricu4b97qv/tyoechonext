@@ -9,6 +9,3 @@ indent_size = 2
 
 [*.scss]
 indent_size = 2
-
-[*.php]
-insert_final_newline = true

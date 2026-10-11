@@ -40,18 +40,9 @@ func (s *Service) Initialize(input SetupInput) (*store.Site, error) {
 func (s *Service) Authenticate(username, password string) (*store.Admin, error) {
 	user, err := s.repo.User(username)
 	if errors.Is(err, store.ErrNotFound) {
-		// Keep a fallback for databases created before the users migration.
-		admin, adminErr := s.repo.Admin()
-		if errors.Is(adminErr, store.ErrNotFound) {
-			return nil, ErrInvalidCredentials
-		}
-		if adminErr != nil {
-			return nil, adminErr
-		}
-		user = *admin
-		user.Role = "owner"
-		user.Active = true
-	} else if err != nil {
+		return nil, ErrInvalidCredentials
+	}
+	if err != nil {
 		return nil, err
 	}
 	if user.Username != username || !user.Active || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
@@ -72,14 +63,6 @@ func (s *Service) Admin() (*store.Admin, error) {
 
 func (s *Service) User(username string) (*store.User, error) {
 	user, err := s.repo.User(username)
-	if errors.Is(err, store.ErrNotFound) {
-		admin, adminErr := s.repo.Admin()
-		if adminErr == nil && admin.Username == username {
-			admin.Role = "owner"
-			admin.Active = true
-			return admin, nil
-		}
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -223,9 +206,19 @@ func (s *Service) UpdateSite(site store.Site) (*store.Site, error) {
 	if err != nil {
 		return nil, err
 	}
+	description := strings.TrimSpace(site.Description)
+	keywords := strings.TrimSpace(site.Keywords)
+	if runeLength(description) > 2000 {
+		return nil, fmt.Errorf("%w: description must be at most 2000 characters", ErrValidation)
+	}
+	if runeLength(keywords) > 500 {
+		return nil, fmt.Errorf("%w: keywords must be at most 500 characters", ErrValidation)
+	}
 	current.Name = strings.TrimSpace(site.Name)
 	current.URL = strings.TrimRight(strings.TrimSpace(site.URL), "/")
 	current.AdminMail = strings.TrimSpace(site.AdminMail)
+	current.Description = description
+	current.Keywords = keywords
 	if strings.TrimSpace(site.Timezone) != "" {
 		current.Timezone = strings.TrimSpace(site.Timezone)
 	}

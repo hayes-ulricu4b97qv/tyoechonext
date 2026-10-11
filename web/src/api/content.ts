@@ -1,5 +1,5 @@
 import { api, postForm, postJSON, putJSON } from '../api'
-import type { Comment, CommentPage, Media, MediaPage, Page, PagePage, Post, PostPage, Term, TermPage } from '../types'
+import type { Comment, CommentPage, Media, MediaPage, MonthCount, Page, PagePage, Post, PostPage, Term, TermPage } from '../types'
 
 export interface PostInput {
   title: string
@@ -7,6 +7,7 @@ export interface PostInput {
   excerpt: string
   content: string
   status: 'draft' | 'published'
+  allowComment?: boolean
   categories: string[]
   tags: string[]
 }
@@ -22,7 +23,9 @@ export interface PageInput {
 export interface CommentInput {
   authorName: string
   authorEmail: string
+  authorUrl?: string
   content: string
+  parentId?: string
 }
 
 export interface TermInput {
@@ -42,6 +45,8 @@ export interface PostListQuery {
   search?: string
   category?: string
   tag?: string
+  month?: string
+  order?: 'updated' | 'published'
   includeDraft?: boolean
   page?: number
   pageSize?: number
@@ -52,6 +57,8 @@ export function listPosts(query: PostListQuery = {}) {
   if (query.search?.trim()) params.set('q', query.search.trim())
   if (query.category?.trim()) params.set('category', query.category.trim())
   if (query.tag?.trim()) params.set('tag', query.tag.trim())
+  if (query.month?.trim()) params.set('month', query.month.trim())
+  if (query.order) params.set('order', query.order)
   if (query.includeDraft) params.set('includeDraft', 'true')
   return api<PostPage>(`/api/v1/content/posts?${params.toString()}`)
 }
@@ -102,6 +109,15 @@ export function createTerm(input: TermInput) {
 
 export function deleteTerm(id: string) {
   return api<void>(`/api/v1/content/terms/${segment(id)}`, { method: 'DELETE' })
+}
+
+export function listArchive() {
+  return api<{ items: MonthCount[] }>('/api/v1/content/archive')
+}
+
+export function listRecentComments(page = 1, pageSize = 8) {
+  const params = pageQuery(page, pageSize)
+  return api<CommentPage>(`/api/v1/content/comments/recent?${params.toString()}`)
 }
 
 export function listPostComments(slug: string, page = 1, pageSize = 100) {

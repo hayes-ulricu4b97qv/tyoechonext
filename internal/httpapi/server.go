@@ -25,7 +25,14 @@ import (
 )
 
 const (
-	maxJSONBody   = 1 << 20
+	// maxJSONBody is large enough for one post or page document whose body
+	// is a single rune past the documented maximum. UTF-8 uses at most 4
+	// bytes per rune, and encoding/json may escape a rune as \uXXXX.
+	// The extra rune lets validation, rather than the transport limit,
+	// reject an over-long body. The remaining allowance covers the other
+	// documented fields and JSON framing.
+	maxFieldRunes = 200 + 120 + 500 + 20*60 + 20*60
+	maxJSONBody   = (service.MaxContentRunes+1)*6 + maxFieldRunes*4 + 16*1024
 	maxUploadSize = 10 << 20
 	cookieName    = "app_session"
 	csrfCookie    = "app_csrf"
@@ -80,6 +87,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)
 	mux.HandleFunc("GET /api/v1/content/posts", s.listPosts)
+	mux.HandleFunc("GET /api/v1/content/archive", s.listArchive)
+	mux.HandleFunc("GET /api/v1/content/comments/recent", s.listRecentComments)
 	mux.HandleFunc("GET /api/v1/content/pages", s.listPages)
 	mux.HandleFunc("POST /api/v1/content/pages", s.createPage)
 	mux.HandleFunc("GET /api/v1/content/pages/{slug}", s.getPage)
@@ -105,6 +114,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/dashboard/stats", s.dashboardStats)
 	mux.HandleFunc("GET /api/v1/settings/site", s.getSite)
 	mux.HandleFunc("PUT /api/v1/settings/site", s.updateSite)
+	mux.HandleFunc("GET /api/v1/settings/reading", s.getReading)
+	mux.HandleFunc("PUT /api/v1/settings/reading", s.updateReading)
 	mux.HandleFunc("PUT /api/v1/settings/account", s.updateAccount)
 	mux.HandleFunc("GET /api/v1/settings/users", s.listUsers)
 	mux.HandleFunc("POST /api/v1/settings/users", s.createUser)
@@ -262,7 +273,7 @@ func (s *Server) feed(w http.ResponseWriter, _ *http.Request) {
 		Channel: rssChannel{
 			Title:         site.Name,
 			Link:          baseURL,
-			Description:   site.Name + " latest posts",
+			Description:   feedDescription(site),
 			LastBuildDate: time.Now().UTC().Format(time.RFC1123Z),
 			Items:         items,
 		},
@@ -378,22 +389,24 @@ func (s *Server) systemStatus(w http.ResponseWriter, _ *http.Request) {
 	response := map[string]any{
 		"initialized": s.repo.Initialized(),
 		"version":     s.settings.Version,
-		"features":    []string{"content", "pages", "taxonomy", "comments", "media", "users", "sessions", "settings", "feeds", "audit"},
+		"features":    []string{"content", "pages", "taxonomy", "comments", "discussion", "media", "users", "sessions", "settings", "feeds", "archive", "audit"},
 	}
 	if site != nil {
 		response["site"] = publicSite(site)
+		response["reading"] = publicReading(site)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
 
 type postRequest struct {
-	Title      string   `json:"title"`
-	Slug       string   `json:"slug"`
-	Excerpt    string   `json:"excerpt"`
-	Content    string   `json:"content"`
-	Status     string   `json:"status"`
-	Categories []string `json:"categories"`
-	Tags       []string `json:"tags"`
+	Title        string   `json:"title"`
+	Slug         string   `json:"slug"`
+	Excerpt      string   `json:"excerpt"`
+	Content      string   `json:"content"`
+	Status       string   `json:"status"`
+	AllowComment *bool    `json:"allowComment"`
+	Categories   []string `json:"categories"`
+	Tags         []string `json:"tags"`
 }
 
 func (input postRequest) post() store.Post {
@@ -406,6 +419,14 @@ func (input postRequest) post() store.Post {
 		Categories: termInputs(input.Categories, "category"),
 		Tags:       termInputs(input.Tags, "tag"),
 	}
+}
+
+func applyAllowComment(post store.Post, input postRequest, fallback bool) store.Post {
+	post.AllowComment = fallback
+	if input.AllowComment != nil {
+		post.AllowComment = *input.AllowComment
+	}
+	return post
 }
 
 func termInputs(names []string, kind string) []store.Term {
@@ -582,6 +603,18 @@ func serviceError(err error) (int, string) {
 	return http.StatusInternalServerError, "save_failed"
 }
 
+func (s *Server) readingPage(r *http.Request) (int, int) {
+	page, pageSize := pagination(r)
+	if strings.TrimSpace(r.URL.Query().Get("pageSize")) != "" {
+		return page, pageSize
+	}
+	site, err := s.app.Site()
+	if err != nil || site == nil || site.PostsPerPage < 1 || site.PostsPerPage > 50 {
+		return page, pageSize
+	}
+	return page, site.PostsPerPage
+}
+
 func pagination(r *http.Request) (int, int) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
@@ -594,8 +627,38 @@ func pagination(r *http.Request) (int, int) {
 	return page, pageSize
 }
 
+func feedDescription(site *store.Site) string {
+	if site != nil {
+		if description := strings.TrimSpace(site.Description); description != "" {
+			return description
+		}
+		return site.Name + " latest posts"
+	}
+	return "latest posts"
+}
+
 func publicSite(site *store.Site) map[string]string {
-	return map[string]string{"name": site.Name, "url": site.URL, "adminMail": site.AdminMail, "timezone": site.Timezone}
+	return map[string]string{
+		"name":        site.Name,
+		"url":         site.URL,
+		"adminMail":   site.AdminMail,
+		"timezone":    site.Timezone,
+		"description": site.Description,
+		"keywords":    site.Keywords,
+	}
+}
+
+func publicReading(site *store.Site) map[string]any {
+	postsPerPage := site.PostsPerPage
+	if postsPerPage < 1 || postsPerPage > 50 {
+		postsPerPage = 10
+	}
+	return map[string]any{
+		"postsPerPage":              postsPerPage,
+		"commentsEnabled":           site.CommentsEnabled,
+		"commentsRequireModeration": site.CommentsRequireModeration,
+		"commentsThreaded":          site.CommentsThreaded,
+	}
 }
 
 func publicUser(user *store.User) map[string]string {
@@ -616,16 +679,26 @@ func publicUserRecord(user store.User) userResponse {
 }
 
 type postResponse struct {
-	ID          string         `json:"id"`
-	Title       string         `json:"title"`
-	Slug        string         `json:"slug"`
-	Excerpt     string         `json:"excerpt"`
-	Content     string         `json:"content"`
-	Status      string         `json:"status"`
-	Categories  []termResponse `json:"categories,omitempty"`
-	Tags        []termResponse `json:"tags,omitempty"`
-	PublishedAt *time.Time     `json:"publishedAt,omitempty"`
-	UpdatedAt   time.Time      `json:"updatedAt"`
+	ID           string                `json:"id"`
+	Title        string                `json:"title"`
+	Slug         string                `json:"slug"`
+	Excerpt      string                `json:"excerpt"`
+	Content      string                `json:"content"`
+	Status       string                `json:"status"`
+	AllowComment bool                  `json:"allowComment"`
+	Categories   []termResponse        `json:"categories,omitempty"`
+	Tags         []termResponse        `json:"tags,omitempty"`
+	PublishedAt  *time.Time            `json:"publishedAt,omitempty"`
+	UpdatedAt    time.Time             `json:"updatedAt"`
+	Previous     *postNeighborResponse `json:"previous,omitempty"`
+	Next         *postNeighborResponse `json:"next,omitempty"`
+}
+
+type postNeighborResponse struct {
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Slug        string     `json:"slug"`
+	PublishedAt *time.Time `json:"publishedAt,omitempty"`
 }
 
 type termResponse struct {
@@ -668,15 +741,35 @@ type pagePageResponse struct {
 	PageSize int            `json:"pageSize"`
 }
 
+func publicPostWithNeighbors(post store.Post, previous, next *store.Post) postResponse {
+	response := publicPost(post)
+	response.Previous = publicNeighbor(previous)
+	response.Next = publicNeighbor(next)
+	return response
+}
+
+func publicNeighbor(post *store.Post) *postNeighborResponse {
+	if post == nil {
+		return nil
+	}
+	response := &postNeighborResponse{ID: post.ID, Title: post.Title, Slug: post.Slug}
+	if !post.PublishedAt.IsZero() {
+		publishedAt := post.PublishedAt
+		response.PublishedAt = &publishedAt
+	}
+	return response
+}
+
 func publicPost(post store.Post) postResponse {
 	response := postResponse{
-		ID:        post.ID,
-		Title:     post.Title,
-		Slug:      post.Slug,
-		Excerpt:   post.Excerpt,
-		Content:   post.Content,
-		Status:    post.Status,
-		UpdatedAt: post.UpdatedAt,
+		ID:           post.ID,
+		Title:        post.Title,
+		Slug:         post.Slug,
+		Excerpt:      post.Excerpt,
+		Content:      post.Content,
+		Status:       post.Status,
+		AllowComment: post.AllowComment,
+		UpdatedAt:    post.UpdatedAt,
 	}
 	response.Categories = publicTerms(post.Categories)
 	response.Tags = publicTerms(post.Tags)
@@ -731,9 +824,12 @@ func publicPagePage(page store.PagePage) pagePageResponse {
 type commentResponse struct {
 	ID          string    `json:"id"`
 	PostID      string    `json:"postId,omitempty"`
+	ParentID    string    `json:"parentId,omitempty"`
 	PostTitle   string    `json:"postTitle,omitempty"`
+	PostSlug    string    `json:"postSlug,omitempty"`
 	AuthorName  string    `json:"authorName"`
 	AuthorEmail string    `json:"authorEmail,omitempty"`
+	AuthorURL   string    `json:"authorUrl,omitempty"`
 	Content     string    `json:"content"`
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -751,6 +847,10 @@ func publicComment(comment store.Comment, includePrivateFields bool) commentResp
 	response := commentResponse{
 		ID:         comment.ID,
 		AuthorName: comment.AuthorName,
+		ParentID:   comment.ParentID,
+		PostTitle:  comment.PostTitle,
+		PostSlug:   comment.PostSlug,
+		AuthorURL:  comment.AuthorURL,
 		Content:    comment.Content,
 		Status:     comment.Status,
 		CreatedAt:  comment.CreatedAt,
@@ -758,7 +858,6 @@ func publicComment(comment store.Comment, includePrivateFields bool) commentResp
 	}
 	if includePrivateFields {
 		response.PostID = comment.PostID
-		response.PostTitle = comment.PostTitle
 		response.AuthorEmail = comment.AuthorEmail
 	}
 	return response

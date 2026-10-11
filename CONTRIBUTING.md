@@ -1,37 +1,27 @@
-Contributing to Typecho
-=======================
+# Contributing
 
-Thanks for considering contributing to Typecho! There are many ways to contribute to Typecho, and we appreciate all of them.
+This repository is a Go API (`cmd/server`, `internal/`) and a Vue client (`web/`).
 
-## Reporting Bugs
+## Reporting bugs
 
-If you find a bug in the source code, you can help us by [submitting an issue](https://github.com/typecho/typecho/issues) 
-to our [GitHub Repository](https://github.com/typecho/typecho). Even better, you can submit a Pull Request with a fix.
+Describe what you did, the request you sent, and the result you expected. A failing `go test` case or a short HTTP transcript is the most useful report.
 
-## Contributing Code
+## Code
 
-If you would like to contribute code to Typecho, please read the following guidelines:
+* Read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before sending a change.
+* Read [docs/architecture.md](docs/architecture.md) for the module boundaries and the public routes.
+* Go changes belong under `cmd/` and `internal/`. Run `go test ./...` from the repository root.
+* Vue changes belong under `web/`. From that directory, run `npm run build`.
+* Keep the public routes stable: `/setting`, `/admin`, `/user`, `/user/{slug}`, `/page/{slug}`, `/api/v1`, `/feed.xml`, `/healthz`, and `/readyz`.
 
-* [Code of Conduct](CODE_OF_CONDUCT.md)
-* [Contributing Guide](CONTRIBUTING.md)
-* [Coding Style Guide](CODING_STYLE.md)
+## Local run
 
-## Translations
+```bash
+cd web
+npm ci
+npm run build
+cd ..
+go run ./cmd/server
+```
 
-Please see [TRANSLATION](https://github.com/typecho/languages) for details.
-
-## Plugin Development
-
-Please see [Plugin Development](http://docs.typecho.org/plugins) for details.
-
-## Theme Development
-
-Please see [Theme Development](http://docs.typecho.org/themes) for details.
-
-## Community
-
-* [Telegram Channel](https://t.me/typechodev)
-* [Homepage](http://typecho.org/)
-* [Documents](http://docs.typecho.org/)
-* [Community](http://forum.typecho.org/)
-* [Download](http://typecho.org/download)
+Open `http://localhost:8080/setting` for the first setup. For UI work, `cd web && npm run dev` proxies `/api` to the Go service.

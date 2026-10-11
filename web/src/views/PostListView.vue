@@ -4,6 +4,9 @@ import { ApiError } from '../api'
 import { listPosts, listTerms } from '../api/content'
 import type { Post, PostPage, Term, TermPage } from '../types'
 
+const props = withDefaults(defineProps<{ pageSize?: number }>(), { pageSize: 10 })
+const pageSize = computed(() => (props.pageSize >= 1 && props.pageSize <= 50 ? props.pageSize : 10))
+
 const posts = ref<Post[]>([])
 const terms = ref<Term[]>([])
 const loading = ref(true)
@@ -12,14 +15,15 @@ const search = ref('')
 const submittedSearch = ref('')
 const categoryFilter = ref('')
 const tagFilter = ref('')
+const monthFilter = ref('')
 const page = ref(1)
-const pageSize = 9
 const total = ref(0)
 
 function syncFiltersFromURL() {
   const filters = new URLSearchParams(window.location.search)
   categoryFilter.value = filters.get('category') ?? ''
   tagFilter.value = filters.get('tag') ?? ''
+  monthFilter.value = filters.get('month') ?? ''
   submittedSearch.value = filters.get('q') ?? ''
   search.value = submittedSearch.value
 }
@@ -28,6 +32,7 @@ function updateFilterURL() {
   const query = new URLSearchParams()
   if (categoryFilter.value) query.set('category', categoryFilter.value)
   if (tagFilter.value) query.set('tag', tagFilter.value)
+  if (monthFilter.value) query.set('month', monthFilter.value)
   if (submittedSearch.value.trim()) query.set('q', submittedSearch.value.trim())
   const suffix = query.toString() ? `?${query.toString()}` : ''
   window.history.pushState({}, '', `${window.location.pathname}${suffix}`)
@@ -41,8 +46,9 @@ async function loadPosts() {
       search: submittedSearch.value,
       category: categoryFilter.value,
       tag: tagFilter.value,
+      month: monthFilter.value,
       page: page.value,
-      pageSize,
+      pageSize: pageSize.value,
     })
     posts.value = response.items
     total.value = response.total
@@ -85,6 +91,13 @@ function clearTerms() {
   void loadPosts()
 }
 
+function clearMonth() {
+  monthFilter.value = ''
+  page.value = 1
+  updateFilterURL()
+  void loadPosts()
+}
+
 function changePage(nextPage: number) {
   if (nextPage < 1 || nextPage > totalPages.value || nextPage === page.value) return
   page.value = nextPage
@@ -101,7 +114,7 @@ function handlePopState() {
   void loadPosts()
 }
 
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 
 onMounted(async () => {
   syncFiltersFromURL()
@@ -120,7 +133,8 @@ onUnmounted(() => {
     <button class="term-filter" :class="{ active: !categoryFilter && !tagFilter }" @click="clearTerms">全部</button>
     <a v-for="term in terms" :key="term.id" class="term-filter" :class="{ active: categoryFilter === term.slug || tagFilter === term.slug }" :href="termURL(term)" @click.prevent="selectTerm(term)">{{ term.name }} <small>{{ term.postCount }}</small></a>
   </div>
-  <div class="content-heading"><div><h2>最新文章</h2><span>{{ total }} 篇</span></div><form class="search-bar" @submit.prevent="submitSearch"><input v-model="search" type="search" placeholder="搜索文章" aria-label="搜索文章" /><button class="text-button" type="submit">搜索</button></form></div>
+  <div v-if="monthFilter" class="month-filter-bar"><span>归档 {{ monthFilter }}</span><button class="text-button" type="button" @click="clearMonth">查看全部</button></div>
+  <div class="content-heading"><div><h2>{{ monthFilter ? `${monthFilter} 的文章` : '最新文章' }}</h2><span>{{ total }} 篇</span></div><form class="search-bar" @submit.prevent="submitSearch"><input v-model="search" type="search" placeholder="搜索文章" aria-label="搜索文章" /><button class="text-button" type="submit">搜索</button></form></div>
   <div v-if="loading" class="empty-state">正在加载文章…</div>
   <div v-else-if="error" class="empty-state empty-error">{{ error }}</div>
   <div v-else-if="posts.length === 0" class="empty-state"><strong>还没有公开文章</strong><span>登录管理端发布第一篇内容吧。</span><a href="/admin" class="button button-dark">进入管理端</a></div>
