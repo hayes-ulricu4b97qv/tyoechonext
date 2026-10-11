@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, ApiError } from './api'
+import { ApiError } from './api'
+import { getStatus } from './api/auth'
 import type { Status } from './types'
 import AdminView from './views/AdminView.vue'
 import SettingView from './views/SettingView.vue'
@@ -28,7 +29,7 @@ function reload() {
 onMounted(async () => {
   window.addEventListener('popstate', refreshPath)
   try {
-    status.value = await api<Status>('/api/v1/system/status')
+    status.value = await getStatus()
     if (!status.value.initialized && page.value !== 'setting') {
       window.location.replace('/setting')
     }

@@ -2,15 +2,19 @@ package httpapi
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,16 +25,20 @@ import (
 )
 
 const (
-	maxJSONBody = 1 << 20
-	cookieName  = "app_session"
+	maxJSONBody   = 1 << 20
+	maxUploadSize = 10 << 20
+	cookieName    = "app_session"
+	csrfCookie    = "app_csrf"
+	csrfHeader    = "X-CSRF-Token"
 )
 
 type Server struct {
-	repo     store.Repository
-	app      *service.Service
-	settings config.Settings
-	logger   *slog.Logger
-	webDir   string
+	repo      store.Repository
+	app       *service.Service
+	settings  config.Settings
+	logger    *slog.Logger
+	webDir    string
+	mediaRoot string
 }
 
 func NewServer(repo store.Repository, settings config.Settings, logger *slog.Logger) *Server {
@@ -41,31 +49,68 @@ func NewServer(repo store.Repository, settings config.Settings, logger *slog.Log
 	if webDir == "" {
 		webDir = "./web/dist"
 	}
+	mediaRoot := os.Getenv("APP_MEDIA_DIR")
+	if mediaRoot == "" {
+		dataDir := os.Getenv("APP_DATA_DIR")
+		if dataDir == "" {
+			dataDir = "./data"
+		}
+		mediaRoot = filepath.Join(dataDir, "uploads")
+	}
 	return &Server{
-		repo:     repo,
-		app:      service.New(repo),
-		settings: settings,
-		logger:   logger,
-		webDir:   webDir,
+		repo:      repo,
+		app:       service.New(repo),
+		settings:  settings,
+		logger:    logger,
+		webDir:    webDir,
+		mediaRoot: mediaRoot,
 	}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /readyz", s.ready)
+	mux.HandleFunc("GET /feed.xml", s.feed)
+	mux.HandleFunc("GET /sitemap.xml", s.sitemap)
+	mux.HandleFunc("GET /robots.txt", s.robots)
 	mux.HandleFunc("GET /api/v1/system/status", s.systemStatus)
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)
 	mux.HandleFunc("GET /api/v1/content/posts", s.listPosts)
+	mux.HandleFunc("GET /api/v1/content/pages", s.listPages)
+	mux.HandleFunc("POST /api/v1/content/pages", s.createPage)
+	mux.HandleFunc("GET /api/v1/content/pages/{slug}", s.getPage)
+	mux.HandleFunc("PUT /api/v1/content/pages/{id}", s.updatePage)
+	mux.HandleFunc("DELETE /api/v1/content/pages/{id}", s.deletePage)
+	mux.HandleFunc("GET /api/v1/content/terms", s.listTerms)
+	mux.HandleFunc("POST /api/v1/content/terms", s.createTerm)
+	mux.HandleFunc("PUT /api/v1/content/terms/{id}", s.updateTerm)
+	mux.HandleFunc("DELETE /api/v1/content/terms/{id}", s.deleteTerm)
 	mux.HandleFunc("GET /api/v1/content/posts/{slug}", s.getPost)
+	mux.HandleFunc("GET /api/v1/content/posts/{slug}/comments", s.listComments)
+	mux.HandleFunc("POST /api/v1/content/posts/{slug}/comments", s.createComment)
+	mux.HandleFunc("GET /api/v1/content/comments", s.listAllComments)
+	mux.HandleFunc("PUT /api/v1/content/comments/{id}", s.updateComment)
+	mux.HandleFunc("DELETE /api/v1/content/comments/{id}", s.deleteComment)
+	mux.HandleFunc("GET /api/v1/media", s.listMedia)
+	mux.HandleFunc("POST /api/v1/media", s.uploadMedia)
+	mux.HandleFunc("DELETE /api/v1/media/{id}", s.deleteMedia)
+	mux.HandleFunc("GET /media/{id}", s.serveMedia)
 	mux.HandleFunc("POST /api/v1/content/posts", s.createPost)
 	mux.HandleFunc("PUT /api/v1/content/posts/{id}", s.updatePost)
 	mux.HandleFunc("DELETE /api/v1/content/posts/{id}", s.deletePost)
 	mux.HandleFunc("GET /api/v1/dashboard/stats", s.dashboardStats)
 	mux.HandleFunc("GET /api/v1/settings/site", s.getSite)
 	mux.HandleFunc("PUT /api/v1/settings/site", s.updateSite)
+	mux.HandleFunc("PUT /api/v1/settings/account", s.updateAccount)
+	mux.HandleFunc("GET /api/v1/settings/users", s.listUsers)
+	mux.HandleFunc("POST /api/v1/settings/users", s.createUser)
+	mux.HandleFunc("PUT /api/v1/settings/users/{username}", s.updateUser)
+	mux.HandleFunc("DELETE /api/v1/settings/users/{username}", s.deleteUser)
+	mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	mux.HandleFunc("/", s.frontend)
 
 	return requestLog(s.routeGuard(mux), s.logger)
@@ -73,7 +118,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routeGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/api/v1/system/status" || r.URL.Path == "/api/v1/setup" || r.URL.Path == "/api/v1/auth/login" || strings.HasPrefix(r.URL.Path, "/assets/") || r.URL.Path == "/favicon.svg" {
+		s.ensureCSRFCookie(w, r)
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/feed.xml" || r.URL.Path == "/sitemap.xml" || r.URL.Path == "/robots.txt" || r.URL.Path == "/api/v1/system/status" || r.URL.Path == "/api/v1/setup" || r.URL.Path == "/api/v1/auth/login" || strings.HasPrefix(r.URL.Path, "/assets/") || r.URL.Path == "/favicon.svg" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -93,12 +139,234 @@ func (s *Server) routeGuard(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/user", http.StatusTemporaryRedirect)
 			return
 		}
+		if isUnsafeMethod(r.Method) && !s.validCSRF(r) {
+			writeError(w, http.StatusForbidden, "csrf_failed", "A valid CSRF token is required")
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+func (s *Server) ensureCSRFCookie(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(csrfCookie); err == nil && cookie.Value != "" {
+		return
+	}
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: hex.EncodeToString(buffer), Path: "/", HttpOnly: false, SameSite: http.SameSiteLaxMode, Secure: s.settings.CookieSecure})
+}
+
+func (s *Server) validCSRF(r *http.Request) bool {
+	cookie, err := r.Cookie(csrfCookie)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	header := r.Header.Get(csrfHeader)
+	if header == "" || len(header) != len(cookie.Value) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(header), []byte(cookie.Value)) == 1
+}
+
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.settings.Version})
+}
+
+func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
+	if !s.repo.Initialized() {
+		writeError(w, http.StatusServiceUnavailable, "not_ready", "Complete the initial setup before serving traffic")
+		return
+	}
+	if _, err := s.repo.Site(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "not_ready", "The content store is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "version": s.settings.Version})
+}
+
+type rssFeed struct {
+	XMLName xml.Name   `xml:"rss"`
+	Version string     `xml:"version,attr"`
+	Channel rssChannel `xml:"channel"`
+}
+
+type rssChannel struct {
+	Title         string    `xml:"title"`
+	Link          string    `xml:"link"`
+	Description   string    `xml:"description"`
+	LastBuildDate string    `xml:"lastBuildDate"`
+	Items         []rssItem `xml:"item"`
+}
+
+type rssItem struct {
+	Title       string  `xml:"title"`
+	Link        string  `xml:"link"`
+	GUID        rssGUID `xml:"guid"`
+	Description string  `xml:"description"`
+	PubDate     string  `xml:"pubDate"`
+}
+
+type rssGUID struct {
+	Value       string `xml:",chardata"`
+	IsPermaLink bool   `xml:"isPermaLink,attr"`
+}
+
+func (s *Server) feed(w http.ResponseWriter, _ *http.Request) {
+	site, err := s.app.Site()
+	if errors.Is(err, store.ErrNotFound) || site == nil {
+		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
+		return
+	}
+	posts, err := s.app.ListPosts("", false, 1, 20)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
+		return
+	}
+	baseURL := strings.TrimRight(site.URL, "/")
+	items := make([]rssItem, 0, len(posts.Items))
+	for _, post := range posts.Items {
+		publishedAt := post.PublishedAt
+		if publishedAt.IsZero() {
+			publishedAt = post.UpdatedAt
+		}
+		permalink := baseURL + "/user/" + url.PathEscape(post.Slug)
+		description := post.Excerpt
+		if description == "" {
+			description = post.Content
+		}
+		items = append(items, rssItem{
+			Title:       post.Title,
+			Link:        permalink,
+			GUID:        rssGUID{Value: permalink, IsPermaLink: true},
+			Description: description,
+			PubDate:     publishedAt.UTC().Format(time.RFC1123Z),
+		})
+	}
+	feed := rssFeed{
+		Version: "2.0",
+		Channel: rssChannel{
+			Title:         site.Name,
+			Link:          baseURL,
+			Description:   site.Name + " latest posts",
+			LastBuildDate: time.Now().UTC().Format(time.RFC1123Z),
+			Items:         items,
+		},
+	}
+	writeXML(w, http.StatusOK, "application/rss+xml; charset=utf-8", feed)
+}
+
+type sitemapURLSet struct {
+	XMLName xml.Name     `xml:"urlset"`
+	XMLNS   string       `xml:"xmlns,attr"`
+	URLs    []sitemapURL `xml:"url"`
+}
+
+type sitemapURL struct {
+	Location string `xml:"loc"`
+	LastMod  string `xml:"lastmod,omitempty"`
+}
+
+func (s *Server) sitemap(w http.ResponseWriter, _ *http.Request) {
+	site, err := s.app.Site()
+	if errors.Is(err, store.ErrNotFound) || site == nil {
+		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
+		return
+	}
+	baseURL := strings.TrimRight(site.URL, "/")
+	urls := []sitemapURL{{Location: baseURL + "/user"}}
+	for page := 1; ; page++ {
+		posts, err := s.app.ListPosts("", false, page, 100)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
+			return
+		}
+		for _, post := range posts.Items {
+			lastMod := post.UpdatedAt
+			if lastMod.IsZero() {
+				lastMod = post.PublishedAt
+			}
+			entry := sitemapURL{Location: baseURL + "/user/" + url.PathEscape(post.Slug)}
+			if !lastMod.IsZero() {
+				entry.LastMod = lastMod.UTC().Format("2006-01-02")
+			}
+			urls = append(urls, entry)
+		}
+		if len(posts.Items) == 0 || posts.PageSize <= 0 || len(posts.Items) < posts.PageSize {
+			break
+		}
+	}
+	for page := 1; ; page++ {
+		terms, err := s.app.ListTerms("", "", false, page, 100)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published terms")
+			return
+		}
+		for _, term := range terms.Items {
+			entry := sitemapURL{Location: baseURL + "/user?" + term.Kind + "=" + url.QueryEscape(term.Slug)}
+			if !term.UpdatedAt.IsZero() {
+				entry.LastMod = term.UpdatedAt.UTC().Format("2006-01-02")
+			}
+			urls = append(urls, entry)
+		}
+		if len(terms.Items) == 0 || terms.PageSize <= 0 || len(terms.Items) < terms.PageSize {
+			break
+		}
+	}
+	for page := 1; ; page++ {
+		pages, err := s.app.ListPages("", false, page, 100)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published pages")
+			return
+		}
+		for _, item := range pages.Items {
+			entry := sitemapURL{Location: baseURL + "/page/" + url.PathEscape(item.Slug)}
+			if !item.UpdatedAt.IsZero() {
+				entry.LastMod = item.UpdatedAt.UTC().Format("2006-01-02")
+			}
+			urls = append(urls, entry)
+		}
+		if len(pages.Items) == 0 || pages.PageSize <= 0 || len(pages.Items) < pages.PageSize {
+			break
+		}
+	}
+	writeXML(w, http.StatusOK, "application/xml; charset=utf-8", sitemapURLSet{
+		XMLNS: "http://www.sitemaps.org/schemas/sitemap/0.9",
+		URLs:  urls,
+	})
+}
+
+func (s *Server) robots(w http.ResponseWriter, _ *http.Request) {
+	site, err := s.app.Site()
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
+		return
+	}
+	lines := []string{"User-agent: *", "Allow: /"}
+	if site != nil && strings.TrimSpace(site.URL) != "" {
+		lines = append(lines, "Sitemap: "+strings.TrimRight(site.URL, "/")+"/sitemap.xml")
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, strings.Join(lines, "\n")+"\n")
 }
 
 func (s *Server) systemStatus(w http.ResponseWriter, _ *http.Request) {
@@ -110,7 +378,7 @@ func (s *Server) systemStatus(w http.ResponseWriter, _ *http.Request) {
 	response := map[string]any{
 		"initialized": s.repo.Initialized(),
 		"version":     s.settings.Version,
-		"features":    []string{"content", "sessions", "settings"},
+		"features":    []string{"content", "pages", "taxonomy", "comments", "media", "users", "sessions", "settings", "feeds", "audit"},
 	}
 	if site != nil {
 		response["site"] = publicSite(site)
@@ -118,233 +386,46 @@ func (s *Server) systemStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-type setupRequest struct {
-	SiteName      string `json:"siteName"`
-	SiteURL       string `json:"siteUrl"`
-	AdminUsername string `json:"adminUsername"`
-	AdminPassword string `json:"adminPassword"`
-	AdminEmail    string `json:"adminEmail"`
-	Timezone      string `json:"timezone"`
+type postRequest struct {
+	Title      string   `json:"title"`
+	Slug       string   `json:"slug"`
+	Excerpt    string   `json:"excerpt"`
+	Content    string   `json:"content"`
+	Status     string   `json:"status"`
+	Categories []string `json:"categories"`
+	Tags       []string `json:"tags"`
 }
 
-func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
-	if s.repo.Initialized() {
-		writeError(w, http.StatusConflict, "already_initialized", "The application has already been initialized")
-		return
-	}
-	var request setupRequest
-	if err := decodeJSON(w, r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	setup, err := s.app.Initialize(service.SetupInput{
-		SiteName:      request.SiteName,
-		SiteURL:       request.SiteURL,
-		AdminUsername: request.AdminUsername,
-		AdminPassword: request.AdminPassword,
-		AdminEmail:    request.AdminEmail,
-		Timezone:      request.Timezone,
-	})
-	if err != nil {
-		status := http.StatusConflict
-		code := "setup_failed"
-		if errors.Is(err, service.ErrValidation) {
-			status = http.StatusUnprocessableEntity
-			code = "validation_error"
-		}
-		writeError(w, status, code, err.Error())
-		return
-	}
-	if err := s.issueSession(w, request.AdminUsername); err != nil {
-		writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{"initialized": true, "site": publicSite(setup)})
-}
-
-type loginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if !s.repo.Initialized() {
-		writeError(w, http.StatusPreconditionRequired, "setup_required", "Complete the initial setup at /setting")
-		return
-	}
-	var request loginRequest
-	if err := decodeJSON(w, r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	admin, err := s.app.Authenticate(request.Username, request.Password)
-	if err != nil && !errors.Is(err, service.ErrInvalidCredentials) {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read administrator account")
-		return
-	}
-	if errors.Is(err, service.ErrInvalidCredentials) || admin == nil {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Username or password is incorrect")
-		return
-	}
-	if err := s.issueSession(w, admin.Username); err != nil {
-		writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": map[string]string{"username": admin.Username, "email": admin.Email}})
-}
-
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(cookieName); err == nil {
-		_ = s.app.RevokeSession(cookie.Value)
-	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.settings.CookieSecure})
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	admin, ok := s.currentAdmin(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": map[string]string{"username": admin.Username, "email": admin.Email}})
-}
-
-func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
-	page, pageSize := pagination(r)
-	posts, err := s.app.ListPosts(r.URL.Query().Get("q"), s.isAdmin(r), page, pageSize)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read posts")
-		return
-	}
-	writeJSON(w, http.StatusOK, posts)
-}
-
-func (s *Server) getPost(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	post, err := s.app.GetPost(slug, s.isAdmin(r))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not_found", "Post not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read post")
-		return
-	}
-	writeJSON(w, http.StatusOK, post)
-}
-
-func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	var post store.Post
-	if err := decodeJSON(w, r, &post); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	created, err := s.app.CreatePost(post)
-	if err != nil {
-		status, code := serviceError(err)
-		writeError(w, status, code, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, created)
-}
-
-func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	post, err := s.app.GetPost(r.PathValue("id"), true)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not_found", "Post not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read_failed", err.Error())
-		return
-	}
-	var input store.Post
-	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	updated, err := s.app.UpdatePost(post.ID, input)
-	if err != nil {
-		status, code := serviceError(err)
-		writeError(w, status, code, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
-}
-
-func (s *Server) deletePost(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	if err := s.app.DeletePost(r.PathValue("id")); errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not_found", "Post not found")
-	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "delete_failed", err.Error())
-	} else {
-		w.WriteHeader(http.StatusNoContent)
+func (input postRequest) post() store.Post {
+	return store.Post{
+		Title:      input.Title,
+		Slug:       input.Slug,
+		Excerpt:    input.Excerpt,
+		Content:    input.Content,
+		Status:     input.Status,
+		Categories: termInputs(input.Categories, "category"),
+		Tags:       termInputs(input.Tags, "tag"),
 	}
 }
 
-func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
+func termInputs(names []string, kind string) []store.Term {
+	terms := make([]store.Term, 0, len(names))
+	for _, name := range names {
+		terms = append(terms, store.Term{Name: name, Kind: kind})
 	}
-	stats, err := s.app.Stats()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read post stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
+	return terms
 }
 
-func (s *Server) getSite(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	site, err := s.app.Site()
-	if errors.Is(err, store.ErrNotFound) || site == nil {
-		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
-		return
-	}
-	writeJSON(w, http.StatusOK, publicSite(site))
+type pageRequest struct {
+	Title   string `json:"title"`
+	Slug    string `json:"slug"`
+	Excerpt string `json:"excerpt"`
+	Content string `json:"content"`
+	Status  string `json:"status"`
 }
 
-func (s *Server) updateSite(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	var input struct {
-		Name      string `json:"name"`
-		URL       string `json:"url"`
-		AdminMail string `json:"adminMail"`
-		Timezone  string `json:"timezone"`
-	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	updated, err := s.app.UpdateSite(store.Site{Name: input.Name, URL: input.URL, AdminMail: input.AdminMail, Timezone: input.Timezone})
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
-			return
-		}
-		status, code := serviceError(err)
-		writeError(w, status, code, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, publicSite(updated))
+func (input pageRequest) page() store.Page {
+	return store.Page{Title: input.Title, Slug: input.Slug, Excerpt: input.Excerpt, Content: input.Content, Status: input.Status}
 }
 
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
@@ -355,9 +436,55 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+func (s *Server) requireOwner(w http.ResponseWriter, r *http.Request) bool {
+	user, ok := s.currentAdmin(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue")
+		return false
+	}
+	if user.Role != "owner" {
+		writeError(w, http.StatusForbidden, "forbidden", "Owner permission is required")
+		return false
+	}
+	return true
+}
+
+func (s *Server) requireContentEditor(w http.ResponseWriter, r *http.Request) bool {
+	return s.requireRole(w, r, "owner", "editor")
+}
+
+func (s *Server) requireModerator(w http.ResponseWriter, r *http.Request) bool {
+	return s.requireRole(w, r, "owner", "moderator")
+}
+
+func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
+	user, ok := s.currentAdmin(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue")
+		return false
+	}
+	for _, role := range roles {
+		if user.Role == role {
+			return true
+		}
+	}
+	writeError(w, http.StatusForbidden, "forbidden", "You do not have permission for this action")
+	return false
+}
+
 func (s *Server) isAdmin(r *http.Request) bool {
 	_, ok := s.currentAdmin(r)
 	return ok
+}
+
+func (s *Server) canEditContent(r *http.Request) bool {
+	user, ok := s.currentAdmin(r)
+	return ok && (user.Role == "owner" || user.Role == "editor")
+}
+
+func (s *Server) canModerate(r *http.Request) bool {
+	user, ok := s.currentAdmin(r)
+	return ok && (user.Role == "owner" || user.Role == "moderator")
 }
 
 func (s *Server) currentAdmin(r *http.Request) (*store.Admin, bool) {
@@ -369,11 +496,36 @@ func (s *Server) currentAdmin(r *http.Request) (*store.Admin, bool) {
 	if err != nil {
 		return nil, false
 	}
-	admin, err := s.app.Admin()
-	if err != nil || admin == nil || admin.Username != username {
+	admin, err := s.app.User(username)
+	if err != nil || admin == nil || admin.Username != username || !admin.Active {
 		return nil, false
 	}
 	return admin, true
+}
+
+func sessionToken(r *http.Request) string {
+	cookie, err := r.Cookie(cookieName)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+func (s *Server) recordAudit(r *http.Request, action, resourceType, resourceID string, details map[string]string) {
+	event := store.AuditEvent{
+		ActorUsername: "anonymous",
+		Action:        action,
+		ResourceType:  resourceType,
+		ResourceID:    resourceID,
+		Details:       details,
+	}
+	if user, ok := s.currentAdmin(r); ok {
+		event.ActorUserID = user.ID
+		event.ActorUsername = user.Username
+	}
+	if err := s.app.RecordAudit(event); err != nil {
+		s.logger.Warn("record audit event failed", "action", action, "resource_type", resourceType, "resource_id", resourceID, "error", err)
+	}
 }
 
 func (s *Server) issueSession(w http.ResponseWriter, username string) error {
@@ -410,7 +562,7 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, file)
 		return
 	}
-	if cleanPath == "/admin" || strings.HasPrefix(cleanPath, "/admin/") || cleanPath == "/user" || strings.HasPrefix(cleanPath, "/user/") || cleanPath == "/setting" || strings.HasPrefix(cleanPath, "/setting/") {
+	if cleanPath == "/admin" || strings.HasPrefix(cleanPath, "/admin/") || cleanPath == "/user" || strings.HasPrefix(cleanPath, "/user/") || cleanPath == "/page" || strings.HasPrefix(cleanPath, "/page/") || cleanPath == "/setting" || strings.HasPrefix(cleanPath, "/setting/") {
 		index := path.Join(s.webDir, "index.html")
 		if _, err := os.Stat(index); err == nil {
 			http.ServeFile(w, r, index)
@@ -446,13 +598,273 @@ func publicSite(site *store.Site) map[string]string {
 	return map[string]string{"name": site.Name, "url": site.URL, "adminMail": site.AdminMail, "timezone": site.Timezone}
 }
 
+func publicUser(user *store.User) map[string]string {
+	return map[string]string{"username": user.Username, "email": user.Email, "role": user.Role}
+}
+
+type userResponse struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func publicUserRecord(user store.User) userResponse {
+	return userResponse{ID: user.ID, Username: user.Username, Email: user.Email, Role: user.Role, Active: user.Active, CreatedAt: user.CreatedAt}
+}
+
+type postResponse struct {
+	ID          string         `json:"id"`
+	Title       string         `json:"title"`
+	Slug        string         `json:"slug"`
+	Excerpt     string         `json:"excerpt"`
+	Content     string         `json:"content"`
+	Status      string         `json:"status"`
+	Categories  []termResponse `json:"categories,omitempty"`
+	Tags        []termResponse `json:"tags,omitempty"`
+	PublishedAt *time.Time     `json:"publishedAt,omitempty"`
+	UpdatedAt   time.Time      `json:"updatedAt"`
+}
+
+type termResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	Kind      string `json:"kind"`
+	PostCount int    `json:"postCount"`
+}
+
+type termPageResponse struct {
+	Items    []termResponse `json:"items"`
+	Total    int            `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"pageSize"`
+}
+
+type postPageResponse struct {
+	Items    []postResponse `json:"items"`
+	Total    int            `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"pageSize"`
+}
+
+type pageResponse struct {
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Slug        string     `json:"slug"`
+	Excerpt     string     `json:"excerpt"`
+	Content     string     `json:"content"`
+	Status      string     `json:"status"`
+	PublishedAt *time.Time `json:"publishedAt,omitempty"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+type pagePageResponse struct {
+	Items    []pageResponse `json:"items"`
+	Total    int            `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"pageSize"`
+}
+
+func publicPost(post store.Post) postResponse {
+	response := postResponse{
+		ID:        post.ID,
+		Title:     post.Title,
+		Slug:      post.Slug,
+		Excerpt:   post.Excerpt,
+		Content:   post.Content,
+		Status:    post.Status,
+		UpdatedAt: post.UpdatedAt,
+	}
+	response.Categories = publicTerms(post.Categories)
+	response.Tags = publicTerms(post.Tags)
+	if !post.PublishedAt.IsZero() {
+		publishedAt := post.PublishedAt
+		response.PublishedAt = &publishedAt
+	}
+	return response
+}
+
+func publicTerms(terms []store.Term) []termResponse {
+	items := make([]termResponse, 0, len(terms))
+	for _, term := range terms {
+		items = append(items, termResponse{ID: term.ID, Name: term.Name, Slug: term.Slug, Kind: term.Kind, PostCount: term.PostCount})
+	}
+	return items
+}
+
+func publicTerm(term store.Term) termResponse {
+	return termResponse{ID: term.ID, Name: term.Name, Slug: term.Slug, Kind: term.Kind, PostCount: term.PostCount}
+}
+
+func publicTermPage(page store.TermPage) termPageResponse {
+	return termPageResponse{Items: publicTerms(page.Items), Total: page.Total, Page: page.Page, PageSize: page.PageSize}
+}
+
+func publicPostPage(page store.PostPage) postPageResponse {
+	items := make([]postResponse, 0, len(page.Items))
+	for _, post := range page.Items {
+		items = append(items, publicPost(post))
+	}
+	return postPageResponse{Items: items, Total: page.Total, Page: page.Page, PageSize: page.PageSize}
+}
+
+func publicPage(page store.Page) pageResponse {
+	response := pageResponse{ID: page.ID, Title: page.Title, Slug: page.Slug, Excerpt: page.Excerpt, Content: page.Content, Status: page.Status, UpdatedAt: page.UpdatedAt}
+	if !page.PublishedAt.IsZero() {
+		publishedAt := page.PublishedAt
+		response.PublishedAt = &publishedAt
+	}
+	return response
+}
+
+func publicPagePage(page store.PagePage) pagePageResponse {
+	items := make([]pageResponse, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, publicPage(item))
+	}
+	return pagePageResponse{Items: items, Total: page.Total, Page: page.Page, PageSize: page.PageSize}
+}
+
+type commentResponse struct {
+	ID          string    `json:"id"`
+	PostID      string    `json:"postId,omitempty"`
+	PostTitle   string    `json:"postTitle,omitempty"`
+	AuthorName  string    `json:"authorName"`
+	AuthorEmail string    `json:"authorEmail,omitempty"`
+	Content     string    `json:"content"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type commentPageResponse struct {
+	Items    []commentResponse `json:"items"`
+	Total    int               `json:"total"`
+	Page     int               `json:"page"`
+	PageSize int               `json:"pageSize"`
+}
+
+func publicComment(comment store.Comment, includePrivateFields bool) commentResponse {
+	response := commentResponse{
+		ID:         comment.ID,
+		AuthorName: comment.AuthorName,
+		Content:    comment.Content,
+		Status:     comment.Status,
+		CreatedAt:  comment.CreatedAt,
+		UpdatedAt:  comment.UpdatedAt,
+	}
+	if includePrivateFields {
+		response.PostID = comment.PostID
+		response.PostTitle = comment.PostTitle
+		response.AuthorEmail = comment.AuthorEmail
+	}
+	return response
+}
+
+func publicCommentPage(page store.CommentPage, includePrivateFields bool) commentPageResponse {
+	items := make([]commentResponse, 0, len(page.Items))
+	for _, comment := range page.Items {
+		items = append(items, publicComment(comment, includePrivateFields))
+	}
+	return commentPageResponse{Items: items, Total: page.Total, Page: page.Page, PageSize: page.PageSize}
+}
+
+type mediaResponse struct {
+	ID          string    `json:"id"`
+	Filename    string    `json:"filename"`
+	ContentType string    `json:"contentType"`
+	Size        int64     `json:"size"`
+	URL         string    `json:"url"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type mediaPageResponse struct {
+	Items    []mediaResponse `json:"items"`
+	Total    int             `json:"total"`
+	Page     int             `json:"page"`
+	PageSize int             `json:"pageSize"`
+}
+
+func publicMedia(media store.Media) mediaResponse {
+	return mediaResponse{
+		ID:          media.ID,
+		Filename:    media.Filename,
+		ContentType: media.ContentType,
+		Size:        media.Size,
+		URL:         "/media/" + media.ID,
+		CreatedAt:   media.CreatedAt,
+	}
+}
+
+func publicMediaPage(page store.MediaPage) mediaPageResponse {
+	items := make([]mediaResponse, 0, len(page.Items))
+	for _, media := range page.Items {
+		items = append(items, publicMedia(media))
+	}
+	return mediaPageResponse{Items: items, Total: page.Total, Page: page.Page, PageSize: page.PageSize}
+}
+
+func cleanMediaFilename(raw string) string {
+	filename := filepath.Base(strings.TrimSpace(raw))
+	if filename == "." || filename == string(filepath.Separator) || filename == "" || strings.ContainsRune(filename, 0) {
+		return ""
+	}
+	runes := []rune(filename)
+	if len(runes) > 180 {
+		filename = string(runes[:180])
+	}
+	return filename
+}
+
+func allowedMediaType(contentType string) bool {
+	switch contentType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func mediaExtension(contentType string) string {
+	switch contentType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".bin"
+	}
+}
+
+func newMediaID() string {
+	buffer := make([]byte, 12)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("media-%d", time.Now().UnixNano())
+	}
+	return "media-" + hex.EncodeToString(buffer)
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		return errors.New("Content-Type must be application/json")
 	}
-	decoder := json.NewDecoder(io.LimitReader(r.Body, maxJSONBody))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBody))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("invalid JSON: request body must contain a single value")
+		}
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	return nil
@@ -462,6 +874,19 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeXML(w http.ResponseWriter, status int, contentType string, value any) {
+	payload, err := xml.MarshalIndent(value, "", "  ")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "encode_failed", "Unable to encode response")
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, xml.Header)
+	_, _ = w.Write(payload)
+	_, _ = io.WriteString(w, "\n")
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

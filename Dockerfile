@@ -23,13 +23,18 @@ COPY . .
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/typecho-next ./cmd/server
 
 FROM debian:bookworm-slim
-RUN groupadd --system app && useradd --system --gid app --home-dir /app app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system app \
+    && useradd --system --gid app --home-dir /app app
 WORKDIR /app
 COPY --from=api-build /out/typecho-next /app/typecho-next
 COPY --from=web-build /src/web/dist /app/web/dist
 RUN mkdir -p /app/data && chown -R app:app /app
 USER app
-ENV APP_PORT=8080 APP_WEB_DIR=/app/web/dist APP_DATA_DIR=/app/data
+ENV APP_PORT=8080 APP_WEB_DIR=/app/web/dist APP_DATA_DIR=/app/data APP_MEDIA_DIR=/app/data/uploads
 EXPOSE 8080
 VOLUME ["/app/data"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD ["/bin/sh", "-c", "wget -q -O - http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
 ENTRYPOINT ["/app/typecho-next"]

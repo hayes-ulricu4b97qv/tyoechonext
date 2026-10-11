@@ -7,8 +7,9 @@
 ```text
 cmd/server/          Go 服务入口、优雅退出
 internal/config/     环境配置
-internal/httpapi/    HTTP 路由、鉴权与 JSON API
-internal/store/      SQLite 仓储、schema migration 与旧 app.json 导入
+internal/httpapi/    HTTP 路由、鉴权与 JSON API；auth.go、content.go、settings.go 按领域承载认证、内容和设置处理
+internal/service/    业务规则；account.go、content.go、engagement.go、audit_sessions.go、validation.go 按领域拆分
+internal/store/      SQLite 仓储；schema.go、accounts.go、content.go、engagement.go、audit_sessions.go、scan.go 分离迁移、领域查询和扫描辅助
 web/src/             Vue 3 + TypeScript 前端
 web/dist/            Vite 构建产物（运行前生成）
 ```
@@ -19,13 +20,46 @@ web/dist/            Vite 构建产物（运行前生成）
 | --- | --- |
 | `/setting` | 首次部署初始化、站点设置 |
 | `/admin` | 管理端登录、统计、文章编辑 |
-| `/user` | 用户端公开文章列表 |
+| `/user` | 用户端公开文章列表、搜索与 taxonomy 筛选 |
+| `/user/{slug}` | 用户端文章详情与评论 |
+| `/page/{slug}` | 用户端独立页面 |
+| `/feed.xml`、`/sitemap.xml`、`/robots.txt` | Go 服务提供的公开订阅与索引入口 |
 | `/api/v1/*` | 版本化 JSON API |
 | `/healthz` | 部署健康检查 |
+| `/readyz` | 初始化和 SQLite 可用性检查 |
 
 服务启动时会检查 `APP_DATA_DIR/app.db`。首次启动会执行 schema migration；如果存在上一阶段的 `app.json`，会自动导入站点、管理员和文章。没有初始化记录时，页面请求统一转到 `/setting`，初始化成功后才开放 `/admin` 和 `/user`。
 
-文章接口支持 `q`、`page` 和 `pageSize` 参数。公开接口只返回已发布文章，管理员会话可以读取草稿。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希和过期时间，因此服务重启后会话仍然有效。
+文章接口支持 `q`、`page` 和 `pageSize` 参数。公开接口只返回已发布文章，管理员会话可以读取草稿。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希和过期时间；会话现在以迁移后的 `users.id` 作为主关联，并会回填旧的用户名会话记录，因此服务重启后会话仍然有效。
+文章、页面和 taxonomy 搜索会按字面匹配用户输入，`%` 与 `_` 不会被当作 SQL 通配符。
+
+Go 服务直接根据站点设置、已发布文章、独立页面和公开 taxonomy 页面生成 RSS、站点地图与 robots.txt；Vue 用户端不承担公开订阅或搜索引擎索引的生成。
+
+审计事件写入 SQLite 的 `audit_events` 表，并通过 owner-only 的 `GET /api/v1/audit` 查询；文章、评论、媒体、用户、账户和站点的成功变更都会记录操作者、资源和必要的变更详情。
+
+写请求采用双提交 CSRF 令牌：Go 服务设置非 HttpOnly 的 `app_csrf` cookie，Vue API 客户端复制到 `X-CSRF-Token`；初始化和登录是仅有的无需既有令牌的写入口，匿名评论仍不要求登录。
+
+管理员会话还可以通过 `PUT /api/v1/settings/account` 更新账户邮箱，或在提交 `currentPassword` 与 `newPassword` 时修改密码。密码修改沿用 bcrypt 哈希，会话按 `users.id` 关联并在换密时撤销其他令牌。
+
+文章写入接口只接受 `title`、`slug`、`excerpt`、`content`、`status`、`categories` 和 `tags`。ID、发布时间和更新时间由后端生成或维护，存储模型不会直接成为 HTTP 请求模型。
+编辑文章时如果省略 `slug`，服务会保留原有固定链接；新文章才会根据标题生成 slug，避免改标题时破坏已有链接。自动 slug 会保留 Unicode 字母和数字，因此中文标题、分类和标签可以生成稳定的可读路径。
+管理端可从文章和独立页面列表打开预览；服务只会向当前有内容编辑权限的会话返回草稿，匿名用户仍会得到不存在响应。
+文章和独立页面共享内容长度约束：标题最多 200 个字符、slug 最多 120 个字符、摘要最多 500 个字符、正文最多 500,000 个字符。
+
+文章还可以提交 `categories` 和 `tags` 名称数组；Go 服务维护 `terms` 与 `post_terms` 关系表，`GET /api/v1/content/terms` 返回分类、标签及已发布文章数，内容编辑者可通过 `POST/PUT/DELETE /api/v1/content/terms` 管理词条。
+文章列表支持 `category=<slug>` 和/或 `tag=<slug>` 筛选，同时提供两个参数时返回两个词条的交集；草稿仍只会在有内容编辑权限的会话中返回。
+Vue 用户端会从公开词条接口生成筛选导航，分类、标签和搜索状态写入 URL，因此可以直接分享并支持浏览器前进后退。
+
+独立页面使用 `pages` 表和独立 API：公开端通过 `GET /api/v1/content/pages/{slug}` 读取，内容编辑者通过 `GET/POST /api/v1/content/pages`、`PUT/DELETE /api/v1/content/pages/{id}` 管理。
+
+评论通过文章路由提交：`POST /api/v1/content/posts/{slug}/comments` 会创建待审核评论；公开列表只返回 `approved` 评论。管理员可以通过 `/api/v1/content/comments?status=pending` 获取待审核列表，并用 `PUT /api/v1/content/comments/{id}` 将评论设为 `approved`、`pending` 或 `spam`，也可以删除评论。
+
+媒体由 Go 服务保存到 `APP_MEDIA_DIR`，元数据写入 SQLite。管理员通过 `POST /api/v1/media` 上传图片，服务只接受 JPEG、PNG、GIF 和 WebP，单文件上限 10 MB；公开文件通过 `/media/{id}` 读取，删除时同时清理元数据和文件。
+
+用户表是旧 `admins` 单例表的兼容迁移层。首次启动会把旧管理员导入为 `owner`；新用户可以是 `editor` 或 `moderator`。编辑者负责文章和媒体，审核员负责评论，站点、账户和用户管理只对所有者开放。停用用户后，其持久会话会在下一次请求时失效。
+
+所有者用户管理接口为 `GET/POST /api/v1/settings/users`、`PUT/DELETE /api/v1/settings/users/{username}`；密码只在服务端生成 bcrypt 哈希，HTTP 响应不会返回密码字段。更换所有者密码时会保留当前会话并撤销其他会话；工作人员被停用或删除时会清理其会话。
+所有者通过用户更新接口提交新密码即可重置工作人员密码，服务会撤销该用户已有会话。
 
 ## 本地运行
 
@@ -42,6 +76,6 @@ go run ./cmd/server
 ## 后续迁移顺序
 
 1. 把 SQLite 仓储替换为 PostgreSQL（多节点）时保持 API 契约不变。
-2. 增加用户、权限、媒体和评论领域包，不把业务逻辑放回 HTTP handler。
-3. 为文章详情、搜索和主题渲染增加独立的用户端路由。
+2. 扩展用户和权限领域包并补充更细粒度的审计能力；当前已支持 owner、editor、moderator 三种角色，评论、媒体和基础审计领域已完成首个版本。
+3. 在现有文章列表与详情路由上扩展主题渲染和更多内容类型；当前详情内容已由 Vue 使用 Markdown 渲染，并通过 DOMPurify 清理 HTML。
 4. 迁移完成后删除仓库中的旧 PHP 运行时与 `admin/`、`var/` 目录。
