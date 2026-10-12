@@ -1,6 +1,6 @@
 # Typecho Next 架构
 
-这个仓库的产品是 Go API 和 Vue 客户端。服务只打开自己的 SQLite 数据库，并提供下面列出的路由。
+这个仓库的产品是使用 Go API 和 Vue 客户端的个人博客。服务打开自己的 SQLite 数据库，并提供下面列出的路由。运行、备份与恢复见 [operations.md](operations.md)。
 
 ## 目录
 
@@ -25,15 +25,15 @@ web/dist/            Vite 构建产物（运行前生成）
 | `/page/{slug}` | 用户端独立页面 |
 | `/feed.xml`、`/sitemap.xml`、`/robots.txt` | Go 服务提供的公开订阅与索引入口 |
 | `/api/v1/*` | 版本化 JSON API |
-| `/healthz` | 部署健康检查 |
-| `/readyz` | 初始化和 SQLite 可用性检查 |
+| `/healthz` | 存活检查，初始化前也返回正常 |
+| `/readyz` | 就绪检查，初始化完成前返回 503 |
 
 服务启动时打开 `APP_DATA_DIR/app.db`。首次启动会创建本应用的 schema，之后继续执行本应用已有的列升级。没有初始化记录时，页面请求转到 `/setting`，初始化成功后才开放 `/admin` 和 `/user`。
 
-文章接口支持 `q`、`page` 和 `pageSize` 参数。公开接口只返回已发布文章，管理员会话可以读取草稿。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希、`users.id` 和过期时间，因此服务重启后，同一数据库上的登录会话仍然有效。
-文章、页面和 taxonomy 搜索会按字面匹配用户输入，`%` 与 `_` 不会被当作 SQL 通配符。
+文章接口支持 `q`、`category`、`tag`、`month`、`order`、`page` 和 `pageSize` 参数。`order` 默认按 `published_at`，传入 `updated` 时按更新时间。显式传入 1 到 100 之外的 `pageSize` 会返回校验错误。公开接口只返回已发布且发布时间不晚于当前时刻的文章，内容编辑者可以带 `includeDraft=true` 读取草稿。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希、`users.id` 和过期时间，因此服务重启后，同一数据库上的登录会话仍然有效。会话寿命由 `APP_SESSION_TTL_MIN` 决定，缺省 1440 分钟。
+文章和页面搜索使用词元索引，并按字面匹配用户输入，`%` 与 `_` 不会被当作通配符。分类和标签名称仍用带转义的 `LIKE`。
 
-Go 服务直接根据站点设置、已发布文章、独立页面和公开 taxonomy 页面生成 RSS、站点地图与 robots.txt；Vue 用户端不承担公开订阅或搜索引擎索引的生成。
+`/feed.xml` 只收录已发布文章，按发布时间排序，描述使用摘要或截断后的正文。`/sitemap.xml` 包含读者首页、已发布文章、公开分类与标签、已发布独立页面。`/robots.txt` 允许 `/`，禁止 `/admin` 和 `/setting`，站点 URL 存在时附上 `Sitemap`。Vue 用户端不生成这些文件。
 
 审计事件写入 SQLite 的 `audit_events` 表，并通过 owner-only 的 `GET /api/v1/audit` 查询；文章、评论、媒体、用户、账户和站点的成功变更都会记录操作者、资源和必要的变更详情。
 
@@ -41,7 +41,7 @@ Go 服务直接根据站点设置、已发布文章、独立页面和公开 taxo
 
 管理员会话还可以通过 `PUT /api/v1/settings/account` 更新账户邮箱，或在提交 `currentPassword` 与 `newPassword` 时修改密码。密码修改沿用 bcrypt 哈希，会话按 `users.id` 关联并在换密时撤销其他令牌。邮箱和密码都写在所有者的 `users` 记录上。
 
-文章写入接口只接受 `title`、`slug`、`excerpt`、`content`、`status`、`allowComment`、`categories` 和 `tags`。省略 `allowComment` 时，新文章默认允许评论，编辑文章则保留原设置。ID、发布时间和更新时间由后端生成或维护，存储模型不会直接成为 HTTP 请求模型。
+文章写入接口接受 `title`、`slug`、`excerpt`、`content`、`status`、`allowComment`、`categories`、`tags`，以及可选的 `publishAt` 和 `passphrase`。`categories` 与 `tags` 是 JSON 字符串数组；管理端表单里的逗号只是录入时的拆分。省略 `allowComment` 时，新文章默认允许评论，编辑文章则保留原设置。首次发布写入 `published_at`，之后再次发布保持该时间。`publishAt` 晚于当前时间时，匿名读者在到达该时间前看不到文章。`passphrase` 只写入哈希，响应不返回口令；未提供正确口令的匿名读者看不到正文。ID 和更新时间由后端生成或维护，存储模型不会直接成为 HTTP 请求模型。
 编辑文章时如果省略 `slug`，服务会保留原有固定链接；新文章才会根据标题生成 slug，避免改标题时破坏已有链接。自动 slug 会保留 Unicode 字母和数字，因此中文标题、分类和标签可以生成稳定的可读路径。
 管理端可从文章和独立页面列表打开预览；服务只会向当前有内容编辑权限的会话返回草稿，匿名用户仍会得到不存在响应。
 文章和独立页面共享内容长度约束：标题最多 200 个字符、slug 最多 120 个字符、摘要最多 500 个字符、正文最多 500,000 个字符。
@@ -67,9 +67,9 @@ Vue 用户端会从公开词条接口生成筛选导航，分类、标签和搜�
 所有者用户管理接口为 `GET/POST /api/v1/settings/users`、`PUT/DELETE /api/v1/settings/users/{username}`；密码只在服务端生成 bcrypt 哈希，HTTP 响应不会返回密码字段。更换所有者密码时会保留当前会话并撤销其他会话；工作人员被停用或删除时会清理其会话。
 所有者通过用户更新接口提交新密码即可重置工作人员密码，服务会撤销该用户已有会话。
 
-## 本地运行
+## Windows 本地运行
 
-```bash
+```powershell
 cd web
 npm ci
 npm run build

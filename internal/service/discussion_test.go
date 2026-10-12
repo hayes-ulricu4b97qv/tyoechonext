@@ -30,14 +30,14 @@ func TestBuildCommentUsesReadingPolicy(t *testing.T) {
 	}{
 		{name: "moderation", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "hello"}, status: "pending"},
 		{name: "auto approve", site: store.Site{CommentsEnabled: true, CommentsThreaded: true}, post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "hello"}, status: "approved"},
-		{name: "closed site", site: store.Site{CommentsThreaded: true}, post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "hello"}, wantErr: "comments are closed"},
-		{name: "closed post", site: openSite(), post: store.Post{ID: "post-1"}, input: CommentInput{AuthorName: "Ada", Content: "hello"}, wantErr: "comments are closed"},
+		{name: "closed site", site: store.Site{CommentsThreaded: true}, post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "hello"}, wantErr: "评论已关闭"},
+		{name: "closed post", site: openSite(), post: store.Post{ID: "post-1"}, input: CommentInput{AuthorName: "Ada", Content: "hello"}, wantErr: "评论已关闭"},
 		{name: "reply", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", AuthorURL: "https://example.com", Content: "reply"}, parent: &parent, status: "pending"},
-		{name: "replies disabled", site: store.Site{CommentsEnabled: true, CommentsRequireModeration: true}, post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &parent, wantErr: "replies are disabled"},
-		{name: "pending parent", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &store.Comment{ID: "comment-2", PostID: "post-1", Status: "pending"}, wantErr: "approved comment"},
-		{name: "other post", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &store.Comment{ID: "comment-3", PostID: "post-2", Status: "approved"}, wantErr: "same post"},
-		{name: "too deep", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &parent, depth: 2, wantErr: "too deep"},
-		{name: "bad url", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", AuthorURL: "javascript:alert(1)", Content: "hello"}, wantErr: "authorUrl"},
+		{name: "replies disabled", site: store.Site{CommentsEnabled: true, CommentsRequireModeration: true}, post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &parent, wantErr: "已关闭回复"},
+		{name: "pending parent", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &store.Comment{ID: "comment-2", PostID: "post-1", Status: "pending"}, wantErr: "已通过的评论"},
+		{name: "other post", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &store.Comment{ID: "comment-3", PostID: "post-2", Status: "approved"}, wantErr: "同一篇文章"},
+		{name: "too deep", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", Content: "reply"}, parent: &parent, depth: 2, wantErr: "回复层级过多"},
+		{name: "bad url", site: openSite(), post: openPost(), input: CommentInput{AuthorName: "Ada", AuthorURL: "javascript:alert(1)", Content: "hello"}, wantErr: "网址"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

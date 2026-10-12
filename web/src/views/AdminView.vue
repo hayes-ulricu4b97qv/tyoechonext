@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import DOMPurify from 'dompurify'
+import { marked } from 'marked'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ApiError } from '../api'
-import { getCurrentUser, login as loginRequest, logout as logoutRequest } from '../api/auth'
+import { forgotPassword, getCurrentUser, login as loginRequest, logout as logoutRequest, resetPassword } from '../api/auth'
 import {
   createTerm as createTermRequest,
   deleteComment,
@@ -9,39 +11,60 @@ import {
   deletePage,
   deletePost,
   deleteTerm,
+  getPost,
   listMedia,
+  listModerationComments,
   listPages,
-  listPendingComments,
   listPosts,
+  listRevisions,
   listTerms,
   moderateComment as moderateCommentRequest,
+  restoreRevision,
   savePage as savePageRequest,
   savePost,
+  updateTerm,
   uploadMedia as uploadMediaFile,
+  type PostRevision,
 } from '../api/content'
+import { setDocumentMeta } from '../meta'
 import { getDashboardStats } from '../api/settings'
-import type { Comment, CommentPage, Media, MediaPage, Page, PagePage, Post, PostPage, Stats, Status, Term, TermPage, User } from '../types'
+import type { Comment, Media, Page, Post, Stats, Status, Term, User } from '../types'
 
-defineProps<{ status: Status }>()
+const props = defineProps<{ status: Status }>()
+const adminPageSize = 100
 
 const user = ref<User | null>(null)
 const stats = ref<Stats>({ posts: 0, publishedPosts: 0, drafts: 0, comments: 0, pendingComments: 0 })
 const posts = ref<Post[]>([])
+const postPage = ref(1)
+const postTotal = ref(0)
 const pages = ref<Page[]>([])
-const pendingComments = ref<Comment[]>([])
+const pagePage = ref(1)
+const pageTotal = ref(0)
+const moderationComments = ref<Comment[]>([])
+const commentPage = ref(1)
+const commentTotal = ref(0)
+const commentStatus = ref<'pending' | 'approved' | 'spam'>('pending')
 const media = ref<Media[]>([])
+const mediaPage = ref(1)
+const mediaTotal = ref(0)
 const terms = ref<Term[]>([])
+const termPage = ref(1)
+const termTotal = ref(0)
 const loading = ref(true)
 const error = ref('')
 const loginForm = reactive({ username: '', password: '' })
 const loginError = ref('')
 const loginLoading = ref(false)
 const showEditor = ref(false)
-const editor = reactive({ title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft' as 'draft' | 'published' })
+const editor = reactive({ title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft' as 'draft' | 'published', publishAt: '', passphrase: '' })
+const revisions = ref<PostRevision[]>([])
+const previewHTML = computed(() => DOMPurify.sanitize(String(marked.parse(editor.content || '', { async: false }))))
 const editorError = ref('')
 const editingId = ref<string | null>(null)
 const showPageEditor = ref(false)
 const pageEditor = reactive({ title: '', slug: '', excerpt: '', content: '', status: 'draft' as 'draft' | 'published' })
+const pagePreviewHTML = computed(() => DOMPurify.sanitize(String(marked.parse(pageEditor.content || '', { async: false }))))
 const pageEditorError = ref('')
 const editingPageId = ref<string | null>(null)
 const commentError = ref('')
@@ -53,8 +76,20 @@ const termForm = reactive({ name: '', kind: 'category' as 'category' | 'tag' })
 const termError = ref('')
 const termSubmitting = ref(false)
 const termActionId = ref<string | null>(null)
+const renamingId = ref<string | null>(null)
+const renameValue = ref('')
+const showReset = ref(false)
+const showPreview = ref(false)
+const showPagePreview = ref(false)
+const postListFilter = ref<'all' | 'published' | 'draft'>('all')
+const activeAnchor = ref('overview')
+let sectionObserver: IntersectionObserver | undefined
+const resetToken = ref('')
+const resetPasswordValue = ref('')
+const forgotMessage = ref('')
 const canEditContent = computed(() => user.value?.role === 'owner' || user.value?.role === 'editor')
 const canModerateComments = computed(() => user.value?.role === 'owner' || user.value?.role === 'moderator')
+const visiblePosts = computed(() => posts.value.filter((post) => postListFilter.value === 'all' || post.status === postListFilter.value))
 
 async function loadDashboard() {
   loading.value = true
@@ -64,20 +99,26 @@ async function loadDashboard() {
     user.value = me.user
     const canEdit = me.user.role === 'owner' || me.user.role === 'editor'
     const canModerate = me.user.role === 'owner' || me.user.role === 'moderator'
+    const blank = <T,>() => ({ items: [] as T[], total: 0, page: 1, pageSize: adminPageSize })
     const [summary, postResponse, pageResponse, commentResponse, mediaResponse, termResponse] = await Promise.all([
       getDashboardStats(),
-      listPosts({ includeDraft: true, page: 1, pageSize: 100 }),
-      canEdit ? listPages(true, 1, 100) : Promise.resolve({ items: [], total: 0, page: 1, pageSize: 100 }),
-      canModerate ? listPendingComments(1, 100) : Promise.resolve({ items: [], total: 0, page: 1, pageSize: 100 }),
-      canEdit ? listMedia(1, 100) : Promise.resolve({ items: [], total: 0, page: 1, pageSize: 100 }),
-      canEdit ? listTerms(true, 1, 100) : Promise.resolve({ items: [], total: 0, page: 1, pageSize: 100 }),
+      listPosts({ includeDraft: true, page: postPage.value, pageSize: adminPageSize }),
+      canEdit ? listPages(true, pagePage.value, adminPageSize) : Promise.resolve(blank<Page>()),
+      canModerate ? listModerationComments(commentStatus.value, commentPage.value, adminPageSize) : Promise.resolve(blank<Comment>()),
+      canEdit ? listMedia(mediaPage.value, adminPageSize) : Promise.resolve(blank<Media>()),
+      canEdit ? listTerms(true, termPage.value, adminPageSize) : Promise.resolve(blank<Term>()),
     ])
     stats.value = summary
     posts.value = postResponse.items
+    postTotal.value = postResponse.total
     pages.value = pageResponse.items
-    pendingComments.value = commentResponse.items
+    pageTotal.value = pageResponse.total
+    moderationComments.value = commentResponse.items
+    commentTotal.value = commentResponse.total
     media.value = mediaResponse.items
+    mediaTotal.value = mediaResponse.total
     terms.value = termResponse.items
+    termTotal.value = termResponse.total
   } catch (reason) {
     if (!(reason instanceof ApiError && reason.status === 401)) {
       error.value = reason instanceof ApiError ? reason.message : '管理数据加载失败'
@@ -85,6 +126,22 @@ async function loadDashboard() {
   } finally {
     loading.value = false
   }
+  if (user.value) await bindSections()
+}
+
+function bindSections() {
+  sectionObserver?.disconnect()
+  return nextTick(() => {
+    const nodes = ['overview', 'posts', 'pages', 'comments', 'media', 'taxonomy']
+      .map((id) => document.getElementById(id))
+      .filter((node): node is HTMLElement => node instanceof HTMLElement)
+    if (nodes.length === 0) return
+    sectionObserver = new IntersectionObserver((entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting).sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0]
+      if (visible?.target instanceof HTMLElement && visible.target.id) activeAnchor.value = visible.target.id
+    }, { rootMargin: '-30% 0px -55% 0px', threshold: [0.15, 0.4] })
+    for (const node of nodes) sectionObserver.observe(node)
+  })
 }
 
 async function login() {
@@ -106,26 +163,93 @@ async function logout() {
   user.value = null
 }
 
-function startEdit(post: Post) {
-  editingId.value = post.id
-  Object.assign(editor, {
-    title: post.title,
-    slug: post.slug,
-    excerpt: post.excerpt,
-    content: post.content,
-    categories: post.categories?.map((term) => term.name).join(', ') ?? '',
-    tags: post.tags?.map((term) => term.name).join(', ') ?? '',
-    allowComment: post.allowComment !== false,
-    status: post.status,
-  })
+function pageCount(total: number) {
+  return Math.max(1, Math.ceil(total / adminPageSize))
+}
+
+async function changePostPage(next: number) {
+  if (next < 1 || next > pageCount(postTotal.value)) return
+  postPage.value = next
+  await loadDashboard()
+}
+
+async function changePagePage(next: number) {
+  if (next < 1 || next > pageCount(pageTotal.value)) return
+  pagePage.value = next
+  await loadDashboard()
+}
+
+async function changeMediaPage(next: number) {
+  if (next < 1 || next > pageCount(mediaTotal.value)) return
+  mediaPage.value = next
+  await loadDashboard()
+}
+
+async function changeTermPage(next: number) {
+  if (next < 1 || next > pageCount(termTotal.value)) return
+  termPage.value = next
+  await loadDashboard()
+}
+
+async function changeCommentPage(next: number) {
+  if (next < 1 || next > pageCount(commentTotal.value)) return
+  commentPage.value = next
+  await loadDashboard()
+}
+
+async function switchCommentStatus(status: 'pending' | 'approved' | 'spam') {
+  commentStatus.value = status
+  commentPage.value = 1
+  await loadDashboard()
+}
+
+async function startEdit(post: Post) {
   editorError.value = ''
+  try {
+    const full = await getPost(post.slug)
+    editingId.value = full.id
+    Object.assign(editor, {
+      title: full.title,
+      slug: full.slug,
+      excerpt: full.excerpt,
+      content: full.content ?? '',
+      categories: full.categories?.map((term) => term.name).join(', ') ?? '',
+      tags: full.tags?.map((term) => term.name).join(', ') ?? '',
+      allowComment: full.allowComment !== false,
+      status: full.status,
+      publishAt: '',
+      passphrase: '',
+    })
+    revisions.value = (await listRevisions(full.id)).items
+    showEditor.value = true
+    showPreview.value = false
+    await nextTick()
+    document.getElementById('post-editor')?.scrollIntoView({ block: 'start', behavior: 'auto' })
+    document.querySelector<HTMLInputElement>('#post-editor .editor-title')?.focus({ preventScroll: true })
+  } catch (reason) {
+    editorError.value = reason instanceof ApiError ? reason.message : '无法打开文章'
+    showEditor.value = true
+  }
+}
+
+async function toggleEditor() {
+  if (showEditor.value) {
+    cancelEditor()
+    return
+  }
   showEditor.value = true
+  showPreview.value = false
+  await nextTick()
+  document.getElementById('post-editor')?.scrollIntoView({ block: 'start', behavior: 'auto' })
+  document.querySelector<HTMLInputElement>('#post-editor .editor-title')?.focus({ preventScroll: true })
 }
 
 function cancelEditor() {
   editingId.value = null
   showEditor.value = false
-  Object.assign(editor, { title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft' })
+  showPreview.value = false
+  revisions.value = []
+  Object.assign(editor, { title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft', publishAt: '', passphrase: '' })
   editorError.value = ''
 }
 
@@ -141,6 +265,8 @@ async function publish() {
       categories: splitTerms(editor.categories),
       tags: splitTerms(editor.tags),
       allowComment: editor.allowComment,
+      publishAt: editor.publishAt ? new Date(editor.publishAt).toISOString() : undefined,
+      passphrase: editor.passphrase || undefined,
     }
     await savePost(editingId.value, payload)
     cancelEditor()
@@ -155,11 +281,29 @@ function startPageEdit(page: Page) {
   Object.assign(pageEditor, { title: page.title, slug: page.slug, excerpt: page.excerpt, content: page.content, status: page.status })
   pageEditorError.value = ''
   showPageEditor.value = true
+  showPagePreview.value = false
+  void nextTick(() => {
+    document.getElementById('page-editor')?.scrollIntoView({ block: 'start', behavior: 'auto' })
+    document.querySelector<HTMLInputElement>('#page-editor .editor-title')?.focus({ preventScroll: true })
+  })
+}
+
+async function togglePageEditor() {
+  if (showPageEditor.value) {
+    cancelPageEditor()
+    return
+  }
+  showPageEditor.value = true
+  showPagePreview.value = false
+  await nextTick()
+  document.getElementById('page-editor')?.scrollIntoView({ block: 'start', behavior: 'auto' })
+  document.querySelector<HTMLInputElement>('#page-editor .editor-title')?.focus({ preventScroll: true })
 }
 
 function cancelPageEditor() {
   editingPageId.value = null
   showPageEditor.value = false
+  showPagePreview.value = false
   Object.assign(pageEditor, { title: '', slug: '', excerpt: '', content: '', status: 'draft' })
   pageEditorError.value = ''
 }
@@ -266,6 +410,75 @@ async function removeMedia(asset: Media) {
   }
 }
 
+function insertMedia(asset: Media) {
+  const markdown = `![](${asset.url})`
+  editor.content = editor.content ? `${editor.content}\n${markdown}\n` : `${markdown}\n`
+  showEditor.value = true
+  showPreview.value = false
+  void nextTick(() => {
+    document.getElementById('post-editor')?.scrollIntoView({ block: 'start', behavior: 'auto' })
+    document.querySelector<HTMLTextAreaElement>('#post-editor textarea')?.focus({ preventScroll: true })
+  })
+}
+
+async function restore(revision: PostRevision) {
+  if (!editingId.value) return
+  editorError.value = ''
+  try {
+    const restored = await restoreRevision(editingId.value, revision.id)
+    editor.title = restored.title
+    editor.excerpt = restored.excerpt
+    editor.content = restored.content ?? ''
+    revisions.value = (await listRevisions(editingId.value)).items
+  } catch (reason) {
+    editorError.value = reason instanceof ApiError ? reason.message : '恢复版本失败'
+  }
+}
+
+async function sendReset() {
+  forgotMessage.value = ''
+  loginError.value = ''
+  try {
+    const response = await forgotPassword(loginForm.username)
+    forgotMessage.value = response.message
+  } catch (reason) {
+    loginError.value = reason instanceof ApiError ? reason.message : '无法发送重置邮件'
+  }
+}
+
+async function applyReset() {
+  forgotMessage.value = ''
+  loginError.value = ''
+  try {
+    await resetPassword(resetToken.value.trim(), resetPasswordValue.value)
+    forgotMessage.value = '密码已重置，请使用新密码登录。'
+    loginForm.password = ''
+    resetPasswordValue.value = ''
+    showReset.value = false
+  } catch (reason) {
+    loginError.value = reason instanceof ApiError ? reason.message : '重置密码失败'
+  }
+}
+
+function beginRename(term: Term) {
+  renamingId.value = term.id
+  renameValue.value = term.name
+}
+
+async function renameTerm(term: Term) {
+  termActionId.value = term.id
+  termError.value = ''
+  try {
+    await updateTerm(term.id, { name: renameValue.value.trim(), kind: term.kind })
+    renamingId.value = null
+    await loadDashboard()
+  } catch (reason) {
+    termError.value = reason instanceof ApiError ? reason.message : '重命名失败'
+  } finally {
+    termActionId.value = null
+  }
+}
+
 async function createTerm() {
   termSubmitting.value = true
   termError.value = ''
@@ -295,42 +508,62 @@ async function removeTerm(term: Term) {
 }
 
 onMounted(async () => {
+  const site = props.status.site
+  setDocumentMeta(site?.name ? `${site.name} · 管理` : '管理', site?.description ?? '', site?.keywords ?? '')
   await loadDashboard()
 })
+
+onUnmounted(() => sectionObserver?.disconnect())
 </script>
 
 <template>
-  <div class="admin-shell">
-    <aside class="admin-sidebar">
-      <a class="brand" href="/user"><span class="brand-mark">T</span><span>Typecho Next</span></a>
-      <div class="side-label">WORKSPACE</div>
-      <nav class="side-nav">
-        <a class="selected" href="/admin"><span>▦</span>概览</a>
-        <a href="/admin#posts"><span>◫</span>文章</a>
-        <a v-if="user?.role === 'owner'" href="/setting"><span>⚙</span>设置</a>
+  <div class="admin-shell" :class="{ 'is-guest': !user }">
+    <header class="admin-command">
+      <a class="brand" href="/user"><span class="brand-mark">{{ status.site?.name?.trim().slice(0, 1) || '博' }}</span><span class="brand-name">{{ status.site?.name ?? '博客' }}</span></a>
+      <nav v-if="user" class="command-nav" aria-label="管理分区">
+        <a href="#overview" :class="{ active: activeAnchor === 'overview' }">概览</a>
+        <a href="#posts" :class="{ active: activeAnchor === 'posts' }">文章</a>
+        <a v-if="canEditContent" href="#pages" :class="{ active: activeAnchor === 'pages' }">页面</a>
+        <a v-if="canModerateComments" href="#comments" :class="{ active: activeAnchor === 'comments' }">评论</a>
+        <a v-if="canEditContent" href="#media" :class="{ active: activeAnchor === 'media' }">媒体</a>
+        <a v-if="canEditContent" href="#taxonomy" :class="{ active: activeAnchor === 'taxonomy' }">分类</a>
+        <a v-if="user.role === 'owner'" href="/setting">设置</a>
       </nav>
-      <div class="side-bottom">
-        <div class="status-pill"><span class="status-dot"></span>服务运行中</div>
-        <a href="/user">查看用户端 ↗</a>
+      <div class="top-actions">
+        <a v-if="user?.role === 'owner'" class="command-link" href="/api/v1/backup">备份</a>
+        <a v-if="user" class="command-link" href="/user">阅读</a>
+        <button v-if="user" class="avatar" type="button" :aria-label="'退出 ' + user.username" :title="'退出 ' + user.username" @click="logout">{{ user.username.slice(0, 1).toUpperCase() }}</button>
       </div>
-    </aside>
+    </header>
     <main class="admin-main">
-      <header class="admin-topbar">
-        <div><p class="eyebrow">ADMIN / OVERVIEW</p><h1>欢迎回来<span v-if="user">，{{ user.username }}</span></h1></div>
-        <div class="top-actions"><a v-if="user?.role === 'owner'" href="/setting" class="icon-button" title="设置">⚙</a><button v-if="user" class="avatar" @click="logout">{{ user.username.slice(0, 1).toUpperCase() }}</button></div>
-      </header>
-
-      <div v-if="!user" class="login-panel">
-        <div class="login-copy"><span class="login-mark">↗</span><h2>进入管理端</h2><p>使用首次设置时创建的管理员账户登录。</p></div>
+      <div v-if="!user" class="login-stage">
+      <div class="login-panel">
+        <div class="login-copy"><span class="login-mark">笔</span><h2>进入管理端</h2><p>使用首次设置时创建的管理员账户登录。写完文章，读者就能在前台看到。</p></div>
         <form @submit.prevent="login">
           <label>用户名<input v-model="loginForm.username" required autocomplete="username" placeholder="admin" /></label>
           <label>密码<input v-model="loginForm.password" required type="password" autocomplete="current-password" placeholder="••••••••" /></label>
           <p v-if="loginError" class="form-error">{{ loginError }}</p>
+          <p v-if="forgotMessage" class="form-success">{{ forgotMessage }}</p>
           <button class="button button-primary button-wide" :disabled="loginLoading">{{ loginLoading ? '登录中…' : '登录管理端' }}</button>
         </form>
+        <button class="text-button" type="button" @click="showReset = !showReset">忘记密码</button>
+        <form v-if="showReset" class="login-reset" @submit.prevent="applyReset">
+          <p>重置说明会发到站点邮箱。把邮件中的重置口令填在下面。</p>
+          <button class="text-button" type="button" :disabled="!loginForm.username" @click="sendReset">发送重置邮件</button>
+          <label>重置口令<input v-model="resetToken" required autocomplete="off" /></label>
+          <label>新密码<input v-model="resetPasswordValue" required type="password" minlength="8" autocomplete="new-password" /></label>
+          <button class="button button-dark button-wide">重置密码</button>
+        </form>
+      </div>
       </div>
 
       <template v-else>
+        <header id="overview" class="admin-topbar">
+          <p class="eyebrow">工作台</p>
+          <h1>欢迎回来<span v-if="user">，{{ user.username }}</span></h1>
+          <p class="admin-lead">写文章、审评论、整理分类和图片，都从这一页开始。</p>
+        </header>
+        <p v-if="error" class="form-error">{{ error }}</p>
         <div class="stats-grid">
           <div class="stat-card"><span>全部文章</span><strong>{{ stats.posts }}</strong><small>累计内容</small></div>
           <div class="stat-card stat-green"><span>已发布</span><strong>{{ stats.publishedPosts }}</strong><small>对外可见</small></div>
@@ -338,37 +571,108 @@ onMounted(async () => {
           <div class="stat-card stat-blue"><span>待审核评论</span><strong>{{ stats.pendingComments }}</strong><small>需要处理</small></div>
         </div>
 
-        <section v-if="canModerateComments && pendingComments.length > 0" class="admin-section comments-section">
-          <div class="section-heading"><div><p class="eyebrow">MODERATION</p><h2>待审核评论</h2></div><span class="section-count">{{ pendingComments.length }} 条</span></div>
+        <section class="admin-section" id="posts">
+          <div class="section-heading"><div><p class="eyebrow">文章</p><h2>写作与稿件</h2></div><span class="section-count">{{ postTotal }} 篇</span><button v-if="canEditContent" class="button button-primary" type="button" @click="toggleEditor">{{ showEditor ? '关闭编辑器' : '+ 写文章' }}</button></div>
+          <form v-if="showEditor && canEditContent" id="post-editor" class="editor-card editor-split" @submit.prevent="publish">
+            <div class="editor-write">
+              <input v-model="editor.title" class="editor-title" required placeholder="文章标题" />
+              <label class="editor-slug">固定链接<input v-model="editor.slug" placeholder="留空则保留现有地址或按标题生成" /></label>
+              <textarea v-model="editor.content" rows="12" required placeholder="开始写作，支持 Markdown…"></textarea>
+              <div class="editor-preview-bar"><button class="text-button" type="button" @click="showPreview = !showPreview">{{ showPreview ? '收起预览' : '看预览' }}</button></div>
+              <div v-if="showPreview" class="article-body article-rich editor-preview" v-html="previewHTML"></div>
+            </div>
+            <div class="editor-meta">
+              <label>摘要<textarea v-model="editor.excerpt" rows="3" placeholder="一句话摘要（可选）"></textarea></label>
+              <label>分类<input v-model="editor.categories" placeholder="产品, 随笔" /></label>
+              <label>标签<input v-model="editor.tags" placeholder="Go, Vue, 重构" /></label>
+              <label>定时发布<input v-model="editor.publishAt" type="datetime-local" /></label>
+              <label>阅读口令<input v-model="editor.passphrase" type="password" autocomplete="new-password" placeholder="留空则不修改；填写后读者需口令才能看正文" /></label>
+              <div v-if="revisions.length" class="taxonomy-list">
+                <div v-for="revision in revisions" :key="revision.id" class="taxonomy-row">
+                  <div><strong>{{ revision.title }}</strong><small>{{ new Date(revision.createdAt).toLocaleString('zh-CN') }}</small></div>
+                  <button class="text-button" type="button" @click="restore(revision)">恢复此版本</button>
+                </div>
+              </div>
+              <div class="editor-actions"><label class="editor-check"><input v-model="editor.allowComment" type="checkbox" />允许评论</label><select v-model="editor.status"><option value="draft">保存为草稿</option><option value="published">立即发布</option></select><p v-if="editorError" class="form-error">{{ editorError }}</p><button class="button button-dark">{{ editingId ? '保存修改' : '保存文章' }}</button></div>
+            </div>
+          </form>
+          <div v-if="loading" class="empty-state">正在加载…</div>
+          <div v-else-if="posts.length === 0" class="empty-state"><strong>开始你的第一篇文章</strong><span>文章会保存在新的内容服务中。</span></div>
+          <template v-else>
+            <div class="term-filter-bar" aria-label="按状态筛选文章">
+              <button class="term-filter" type="button" :class="{ active: postListFilter === 'all' }" @click="postListFilter = 'all'">全部</button>
+              <button class="term-filter" type="button" :class="{ active: postListFilter === 'published' }" @click="postListFilter = 'published'">已发布</button>
+              <button class="term-filter" type="button" :class="{ active: postListFilter === 'draft' }" @click="postListFilter = 'draft'">草稿</button>
+            </div>
+            <div v-if="visiblePosts.length === 0" class="empty-state">这一页没有符合的文章</div>
+            <div v-else class="admin-posts">
+              <div v-for="post in visiblePosts" :key="post.id" class="admin-post-row"><div><span class="post-status" :class="post.status">{{ post.status === 'published' ? '已发布' : '草稿' }}</span><div><strong>{{ post.title }}</strong><small v-if="post.categories?.length || post.tags?.length">{{ [...(post.categories ?? []), ...(post.tags ?? [])].map((term) => term.name).join(' · ') }}</small></div></div><time>{{ new Date(post.publishedAt || post.updatedAt).toLocaleDateString('zh-CN') }}</time><div v-if="canEditContent" class="row-actions"><button class="text-button" type="button" @click="startEdit(post)">编辑</button><a class="text-button" :href="postPreviewURL(post)" target="_blank" rel="noreferrer">{{ post.status === 'published' ? '查看' : '预览' }}</a><button class="text-button danger" type="button" @click="removePost(post)">删除</button></div></div>
+            </div>
+          </template>
+          <div v-if="postTotal > adminPageSize" class="pagination"><button class="text-button" type="button" :disabled="postPage === 1" @click="changePostPage(postPage - 1)">上一页</button><span>{{ postPage }} / {{ pageCount(postTotal) }} · 共 {{ postTotal }} 篇</span><button class="text-button" type="button" :disabled="postPage >= pageCount(postTotal)" @click="changePostPage(postPage + 1)">下一页</button></div>
+        </section>
+
+        <section v-if="canEditContent" class="admin-section page-section" id="pages">
+          <div class="section-heading"><div><p class="eyebrow">页面</p><h2>独立页面</h2></div><span class="section-count">{{ pageTotal }} 个</span><button class="button button-primary" type="button" @click="togglePageEditor">{{ showPageEditor ? '关闭编辑器' : '+ 新建页面' }}</button></div>
+          <form v-if="showPageEditor" id="page-editor" class="editor-card editor-split" @submit.prevent="savePage">
+            <div class="editor-write">
+              <input v-model="pageEditor.title" class="editor-title" required placeholder="页面标题" />
+              <label class="editor-slug">固定链接<input v-model="pageEditor.slug" placeholder="留空则按标题生成" /></label>
+              <textarea v-model="pageEditor.content" rows="12" required placeholder="页面内容，支持 Markdown…"></textarea>
+              <div class="editor-preview-bar"><button class="text-button" type="button" @click="showPagePreview = !showPagePreview">{{ showPagePreview ? '收起预览' : '看预览' }}</button></div>
+              <div v-if="showPagePreview" class="article-body article-rich editor-preview" v-html="pagePreviewHTML"></div>
+            </div>
+            <div class="editor-meta">
+              <label>摘要<textarea v-model="pageEditor.excerpt" rows="3" placeholder="页面摘要（可选）"></textarea></label>
+              <div class="editor-actions"><select v-model="pageEditor.status"><option value="draft">保存为草稿</option><option value="published">立即发布</option></select><p v-if="pageEditorError" class="form-error">{{ pageEditorError }}</p><button class="button button-dark">{{ editingPageId ? '保存修改' : '保存页面' }}</button></div>
+            </div>
+          </form>
+          <div v-if="pages.length === 0" class="empty-state page-empty">还没有独立页面</div>
+          <div v-else class="admin-posts">
+            <div v-for="page in pages" :key="page.id" class="admin-post-row"><div><span class="post-status" :class="page.status">{{ page.status === 'published' ? '已发布' : '草稿' }}</span><div><strong>{{ page.title }}</strong><small>/page/{{ page.slug }}</small></div></div><time>{{ new Date(page.updatedAt).toLocaleDateString('zh-CN') }}</time><div class="row-actions"><button class="text-button" type="button" @click="startPageEdit(page)">编辑</button><a class="text-button" :href="pagePreviewURL(page)" target="_blank" rel="noreferrer">{{ page.status === 'published' ? '查看' : '预览' }}</a><button class="text-button danger" type="button" @click="removePage(page)">删除</button></div></div>
+          </div>
+          <div v-if="pageTotal > adminPageSize" class="pagination"><button class="text-button" type="button" :disabled="pagePage === 1" @click="changePagePage(pagePage - 1)">上一页</button><span>{{ pagePage }} / {{ pageCount(pageTotal) }} · 共 {{ pageTotal }} 个</span><button class="text-button" type="button" :disabled="pagePage >= pageCount(pageTotal)" @click="changePagePage(pagePage + 1)">下一页</button></div>
+        </section>
+
+        <section v-if="canModerateComments" id="comments" class="admin-section comments-section">
+          <div class="section-heading"><div><p class="eyebrow">评论</p><h2>审核</h2></div><span class="section-count">{{ commentTotal }} 条</span></div>
+          <div class="term-filter-bar">
+            <button class="term-filter" type="button" :class="{ active: commentStatus === 'pending' }" @click="switchCommentStatus('pending')">待审核</button>
+            <button class="term-filter" type="button" :class="{ active: commentStatus === 'approved' }" @click="switchCommentStatus('approved')">已通过</button>
+            <button class="term-filter" type="button" :class="{ active: commentStatus === 'spam' }" @click="switchCommentStatus('spam')">垃圾</button>
+          </div>
           <p v-if="commentError" class="form-error">{{ commentError }}</p>
-          <div class="admin-comments">
-            <article v-for="comment in pendingComments" :key="comment.id" class="admin-comment-row">
+          <div v-if="moderationComments.length === 0" class="empty-state">这个状态下还没有评论</div>
+          <div v-else class="admin-comments">
+            <article v-for="comment in moderationComments" :key="comment.id" class="admin-comment-row">
               <div class="comment-row-content">
                 <div class="comment-row-meta"><strong>{{ comment.authorName }}</strong><span v-if="comment.authorEmail">{{ comment.authorEmail }}</span><time>{{ new Date(comment.createdAt).toLocaleDateString('zh-CN') }}</time></div>
                 <p>{{ comment.content }}</p>
                 <small v-if="comment.postTitle">文章：{{ comment.postTitle }}</small>
                 <small v-if="comment.parentId">这是一条回复</small>
               </div>
-              <div class="row-actions"><button class="text-button" :disabled="commentActionId === comment.id" @click="moderateComment(comment, 'approved')">通过</button><button class="text-button danger" :disabled="commentActionId === comment.id" @click="moderateComment(comment, 'spam')">垃圾</button><button class="text-button danger" :disabled="commentActionId === comment.id" @click="removeComment(comment)">删除</button></div>
+              <div class="row-actions"><button v-if="comment.status !== 'approved'" class="text-button" :disabled="commentActionId === comment.id" @click="moderateComment(comment, 'approved')">通过</button><button v-if="comment.status !== 'spam'" class="text-button danger" :disabled="commentActionId === comment.id" @click="moderateComment(comment, 'spam')">垃圾</button><button class="text-button danger" :disabled="commentActionId === comment.id" @click="removeComment(comment)">删除</button></div>
             </article>
           </div>
+          <div v-if="commentTotal > adminPageSize" class="pagination"><button class="text-button" type="button" :disabled="commentPage === 1" @click="changeCommentPage(commentPage - 1)">上一页</button><span>{{ commentPage }} / {{ pageCount(commentTotal) }} · 共 {{ commentTotal }} 条</span><button class="text-button" type="button" :disabled="commentPage >= pageCount(commentTotal)" @click="changeCommentPage(commentPage + 1)">下一页</button></div>
         </section>
 
-        <section v-if="canEditContent" class="admin-section media-section">
-          <div class="section-heading"><div><p class="eyebrow">MEDIA</p><h2>媒体</h2></div><label class="button button-primary media-upload"><input type="file" accept="image/jpeg,image/png,image/gif,image/webp" :disabled="mediaUploading" @change="uploadMedia" />{{ mediaUploading ? '上传中…' : '+ 上传图片' }}</label></div>
+        <section v-if="canEditContent" id="media" class="admin-section media-section">
+          <div class="section-heading"><div><p class="eyebrow">媒体</p><h2>图片</h2></div><span class="section-count">{{ mediaTotal }} 个</span><label class="button button-primary media-upload"><input type="file" accept="image/jpeg,image/png,image/gif,image/webp" :disabled="mediaUploading" @change="uploadMedia" />{{ mediaUploading ? '上传中…' : '+ 上传图片' }}</label></div>
           <p v-if="mediaError" class="form-error">{{ mediaError }}</p>
           <div v-if="media.length === 0" class="empty-state media-empty">还没有上传媒体</div>
           <div v-else class="media-grid">
             <article v-for="asset in media" :key="asset.id" class="media-card">
               <a :href="asset.url" target="_blank" rel="noreferrer"><img :src="asset.url" :alt="asset.filename" loading="lazy" /></a>
               <div class="media-card-info"><strong :title="asset.filename">{{ asset.filename }}</strong><span>{{ Math.ceil(asset.size / 1024) }} KB</span></div>
-              <button class="text-button danger" :disabled="mediaActionId === asset.id" @click="removeMedia(asset)">删除</button>
+              <div class="row-actions"><button class="text-button" type="button" @click="insertMedia(asset)">插入文章</button><button class="text-button danger" :disabled="mediaActionId === asset.id" @click="removeMedia(asset)">删除</button></div>
             </article>
           </div>
+          <div v-if="mediaTotal > adminPageSize" class="pagination"><button class="text-button" type="button" :disabled="mediaPage === 1" @click="changeMediaPage(mediaPage - 1)">上一页</button><span>{{ mediaPage }} / {{ pageCount(mediaTotal) }} · 共 {{ mediaTotal }} 个</span><button class="text-button" type="button" :disabled="mediaPage >= pageCount(mediaTotal)" @click="changeMediaPage(mediaPage + 1)">下一页</button></div>
         </section>
 
-        <section v-if="canEditContent" class="admin-section taxonomy-section">
-          <div class="section-heading"><div><p class="eyebrow">TAXONOMY</p><h2>分类与标签</h2></div><span class="section-count">{{ terms.length }} 个</span></div>
+        <section v-if="canEditContent" id="taxonomy" class="admin-section taxonomy-section">
+          <div class="section-heading"><div><p class="eyebrow">分类</p><h2>分类与标签</h2></div><span class="section-count">{{ termTotal }} 个</span></div>
           <form class="taxonomy-form" @submit.prevent="createTerm">
             <input v-model="termForm.name" required maxlength="60" placeholder="名称" />
             <select v-model="termForm.kind"><option value="category">分类</option><option value="tag">标签</option></select>
@@ -378,43 +682,13 @@ onMounted(async () => {
           <div v-if="terms.length === 0" class="empty-state taxonomy-empty">还没有分类或标签</div>
           <div v-else class="taxonomy-list">
             <div v-for="term in terms" :key="term.id" class="taxonomy-row">
-              <div><strong>{{ term.name }}</strong><small>{{ term.kind === 'category' ? '分类' : '标签' }} · {{ term.postCount }} 篇已发布文章</small></div>
-              <button class="text-button danger" :disabled="termActionId === term.id" @click="removeTerm(term)">删除</button>
+              <div><strong v-if="renamingId !== term.id">{{ term.name }}</strong><input v-else v-model="renameValue" maxlength="60" /><small>{{ term.kind === 'category' ? '分类' : '标签' }} · {{ term.postCount }} 篇已发布文章</small></div>
+              <div class="row-actions"><button v-if="renamingId !== term.id" class="text-button" type="button" @click="beginRename(term)">重命名</button><button v-else class="text-button" type="button" :disabled="termActionId === term.id" @click="renameTerm(term)">保存</button><button class="text-button danger" :disabled="termActionId === term.id" @click="removeTerm(term)">删除</button></div>
             </div>
           </div>
+          <div v-if="termTotal > adminPageSize" class="pagination"><button class="text-button" type="button" :disabled="termPage === 1" @click="changeTermPage(termPage - 1)">上一页</button><span>{{ termPage }} / {{ pageCount(termTotal) }} · 共 {{ termTotal }} 个</span><button class="text-button" type="button" :disabled="termPage >= pageCount(termTotal)" @click="changeTermPage(termPage + 1)">下一页</button></div>
         </section>
 
-        <section v-if="canEditContent" class="admin-section page-section" id="pages">
-          <div class="section-heading"><div><p class="eyebrow">PAGES</p><h2>独立页面</h2></div><button class="button button-primary" @click="showPageEditor ? cancelPageEditor() : (showPageEditor = true)">{{ showPageEditor ? '关闭编辑器' : '+ 新建页面' }}</button></div>
-          <form v-if="showPageEditor" class="editor-card" @submit.prevent="savePage">
-            <input v-model="pageEditor.title" class="editor-title" required placeholder="页面标题" />
-            <label class="editor-slug">固定链接<input v-model="pageEditor.slug" placeholder="留空则按标题生成" /></label>
-            <textarea v-model="pageEditor.excerpt" rows="2" placeholder="页面摘要（可选）"></textarea>
-            <textarea v-model="pageEditor.content" rows="8" required placeholder="页面内容，支持 Markdown…"></textarea>
-            <div class="editor-actions"><select v-model="pageEditor.status"><option value="draft">保存为草稿</option><option value="published">立即发布</option></select><p v-if="pageEditorError" class="form-error">{{ pageEditorError }}</p><button class="button button-dark">{{ editingPageId ? '保存修改' : '保存页面' }}</button></div>
-          </form>
-          <div v-if="pages.length === 0" class="empty-state page-empty">还没有独立页面</div>
-          <div v-else class="admin-posts">
-            <div v-for="page in pages" :key="page.id" class="admin-post-row"><div><span class="post-status" :class="page.status">{{ page.status === 'published' ? '已发布' : '草稿' }}</span><div><strong>{{ page.title }}</strong><small>/page/{{ page.slug }}</small></div></div><time>{{ new Date(page.updatedAt).toLocaleDateString('zh-CN') }}</time><div class="row-actions"><button class="text-button" @click="startPageEdit(page)">编辑</button><a class="text-button" :href="pagePreviewURL(page)" target="_blank" rel="noreferrer">{{ page.status === 'published' ? '查看' : '预览' }}</a><button class="text-button danger" @click="removePage(page)">删除</button></div></div>
-          </div>
-        </section>
-
-        <section class="admin-section" id="posts">
-          <div class="section-heading"><div><p class="eyebrow">CONTENT</p><h2>文章</h2></div><button v-if="canEditContent" class="button button-primary" @click="showEditor ? cancelEditor() : (showEditor = true)">{{ showEditor ? '关闭编辑器' : '+ 写文章' }}</button></div>
-          <form v-if="showEditor && canEditContent" class="editor-card" @submit.prevent="publish">
-            <input v-model="editor.title" class="editor-title" required placeholder="文章标题" />
-            <label class="editor-slug">固定链接<input v-model="editor.slug" placeholder="留空则保留现有地址或按标题生成" /></label>
-            <textarea v-model="editor.excerpt" rows="2" placeholder="一句话摘要（可选）"></textarea>
-            <textarea v-model="editor.content" rows="8" required placeholder="开始写作…"></textarea>
-            <div class="form-grid"><label>分类<input v-model="editor.categories" placeholder="产品, 随笔" /></label><label>标签<input v-model="editor.tags" placeholder="Go, Vue, 重构" /></label></div>
-            <div class="editor-actions"><label class="editor-check"><input v-model="editor.allowComment" type="checkbox" />允许评论</label><select v-model="editor.status"><option value="draft">保存为草稿</option><option value="published">立即发布</option></select><p v-if="editorError" class="form-error">{{ editorError }}</p><button class="button button-dark">{{ editingId ? '保存修改' : '保存文章' }}</button></div>
-          </form>
-          <div v-if="loading" class="empty-state">正在加载…</div>
-          <div v-else-if="posts.length === 0" class="empty-state"><strong>开始你的第一篇文章</strong><span>文章会保存在新的内容服务中。</span></div>
-          <div v-else class="admin-posts">
-            <div v-for="post in posts" :key="post.id" class="admin-post-row"><div><span class="post-status" :class="post.status">{{ post.status === 'published' ? '已发布' : '草稿' }}</span><div><strong>{{ post.title }}</strong><small v-if="post.categories?.length || post.tags?.length">{{ [...(post.categories ?? []), ...(post.tags ?? [])].map((term) => term.name).join(' · ') }}</small></div></div><time>{{ new Date(post.updatedAt).toLocaleDateString('zh-CN') }}</time><div v-if="canEditContent" class="row-actions"><button class="text-button" @click="startEdit(post)">编辑</button><a class="text-button" :href="postPreviewURL(post)" target="_blank" rel="noreferrer">{{ post.status === 'published' ? '查看' : '预览' }}</a><button class="text-button danger" @click="removePost(post)">删除</button></div></div>
-          </div>
-        </section>
       </template>
     </main>
   </div>

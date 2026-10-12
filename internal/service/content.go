@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func (s *Service) ListPosts(search string, includeDrafts bool, page, pageSize int) (store.PostPage, error) {
@@ -17,7 +18,7 @@ func (s *Service) ListPostsByTerm(search, kind, slug string, includeDrafts bool,
 	kind = strings.TrimSpace(kind)
 	slug = strings.TrimSpace(slug)
 	if (kind == "") != (slug == "") || (kind != "" && kind != "category" && kind != "tag") {
-		return store.PostPage{}, fmt.Errorf("%w: a valid category or tag filter is required", ErrValidation)
+		return store.PostPage{}, fmt.Errorf("%w: 需要有效的分类或标签筛选", ErrValidation)
 	}
 	return s.repo.SearchPosts(store.PostQuery{Search: search, IncludeDrafts: includeDrafts, TermKind: kind, TermSlug: slug, Page: page, PageSize: pageSize})
 }
@@ -25,7 +26,7 @@ func (s *Service) ListPostsByTerm(search, kind, slug string, includeDrafts bool,
 func (s *Service) ListTerms(kind, search string, includeDrafts bool, page, pageSize int) (store.TermPage, error) {
 	kind = strings.TrimSpace(kind)
 	if kind != "" && kind != "category" && kind != "tag" {
-		return store.TermPage{}, fmt.Errorf("%w: kind must be category or tag", ErrValidation)
+		return store.TermPage{}, fmt.Errorf("%w: 类型只能是分类或标签", ErrValidation)
 	}
 	return s.repo.ListTerms(store.TermQuery{Kind: kind, Search: search, IncludeDrafts: includeDrafts, Page: page, PageSize: pageSize})
 }
@@ -64,10 +65,24 @@ func (s *Service) GetPost(key string, includeDraft bool) (store.Post, error) {
 	if err != nil {
 		return store.Post{}, err
 	}
-	if post.Status != "published" && !includeDraft {
+	if !includeDraft && !visibleToPublic(post, time.Now().UTC()) {
 		return store.Post{}, store.ErrNotFound
 	}
 	return post, nil
+}
+
+func visibleToPublic(post store.Post, now time.Time) bool {
+	if post.Status != "published" || post.PublishedAt.IsZero() {
+		return false
+	}
+	return post.PublishedAt.UTC().Format("2006-01-02T15:04:05") <= now.UTC().Format("2006-01-02T15:04:05")
+}
+
+func (s *Service) RevealPost(post store.Post, editor bool, passphrase string) bool {
+	if editor || post.PassphraseHash == "" {
+		return true
+	}
+	return bcrypt.CompareHashAndPassword([]byte(post.PassphraseHash), []byte(passphrase)) == nil
 }
 
 func (s *Service) CreatePost(post store.Post) (store.Post, error) {
@@ -78,7 +93,14 @@ func (s *Service) CreatePost(post store.Post) (store.Post, error) {
 	if err := normalizePostTerms(&post); err != nil {
 		return store.Post{}, err
 	}
+	requestedPublish := post.RequestedPublishAt
 	post.PublishedAt = time.Time{}
+	if post.Status == "published" && !requestedPublish.IsZero() {
+		post.PublishedAt = requestedPublish.UTC()
+	}
+	if err := hashPassphrase(&post); err != nil {
+		return store.Post{}, err
+	}
 	var err error
 	post.Slug, err = s.uniqueSlug(post.Slug, post.Title, "")
 	if err != nil {
@@ -108,8 +130,67 @@ func (s *Service) UpdatePost(id string, input store.Post) (store.Post, error) {
 	if err != nil {
 		return store.Post{}, err
 	}
-	input.PublishedAt = current.PublishedAt
+	if !current.PublishedAt.IsZero() {
+		input.PublishedAt = current.PublishedAt
+	} else if input.Status == "published" && !input.RequestedPublishAt.IsZero() {
+		input.PublishedAt = input.RequestedPublishAt.UTC()
+	} else {
+		input.PublishedAt = time.Time{}
+	}
+	if !input.SetPassphrase {
+		input.PassphraseHash = current.PassphraseHash
+	}
+	if err := hashPassphrase(&input); err != nil {
+		return store.Post{}, err
+	}
 	return s.repo.SavePost(input)
+}
+
+func hashPassphrase(post *store.Post) error {
+	if !post.SetPassphrase {
+		return nil
+	}
+	plain := post.PassphrasePlain
+	post.PassphrasePlain = ""
+	if plain == "" {
+		post.PassphraseHash = ""
+		return nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	post.PassphraseHash = string(hash)
+	return nil
+}
+
+func (s *Service) ListPostRevisions(postID string) ([]store.PostRevision, error) {
+	if _, err := s.repo.Post(postID); err != nil {
+		return nil, err
+	}
+	return s.repo.ListPostRevisions(postID)
+}
+
+func (s *Service) RestorePostRevision(postID, revisionID string) (store.Post, error) {
+	current, err := s.repo.Post(postID)
+	if err != nil {
+		return store.Post{}, err
+	}
+	revision, err := s.repo.PostRevision(revisionID)
+	if err != nil {
+		return store.Post{}, err
+	}
+	if revision.PostID != current.ID {
+		return store.Post{}, store.ErrNotFound
+	}
+	current.Title = revision.Title
+	current.Excerpt = revision.Excerpt
+	current.Content = revision.Content
+	current.SetPassphrase = false
+	if err := validatePost(current); err != nil {
+		return store.Post{}, err
+	}
+	return s.repo.SavePost(current)
 }
 
 func (s *Service) DeletePost(id string) error {

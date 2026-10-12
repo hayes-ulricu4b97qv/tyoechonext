@@ -50,7 +50,8 @@ export interface Post {
   title: string
   slug: string
   excerpt: string
-  content: string
+  content?: string
+  locked?: boolean
   status: 'draft' | 'published'
   allowComment?: boolean
   categories?: Term[]

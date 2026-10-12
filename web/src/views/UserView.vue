@@ -1,29 +1,66 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { listArchive, listPages, listPosts, listRecentComments } from '../api/content'
+import { setDocumentMeta } from '../meta'
 import PostDetailView from './PostDetailView.vue'
 import PostListView from './PostListView.vue'
 import PageDetailView from './PageDetailView.vue'
 import type { Comment, MonthCount, Page, Post, Status } from '../types'
 
-defineProps<{ status: Status }>()
+const props = defineProps<{ status: Status }>()
 
-const postSlug = window.location.pathname.match(/^\/user\/(.+)$/)?.[1] ?? ''
-const pageSlug = window.location.pathname.match(/^\/page\/(.+)$/)?.[1] ?? ''
+const rawPost = window.location.pathname.match(/^\/user\/(.+)$/)?.[1] ?? ''
+const postSlug = rawPost ? decodeURIComponent(rawPost) : ''
+const rawPage = window.location.pathname.match(/^\/page\/(.+)$/)?.[1] ?? ''
+const pageSlug = rawPage ? decodeURIComponent(rawPage) : ''
 const pages = ref<Page[]>([])
 const archive = ref<MonthCount[]>([])
 const recentPosts = ref<Post[]>([])
 const recentComments = ref<Comment[]>([])
+const menuOpen = ref(false)
+const showTop = ref(false)
+const brandMark = computed(() => props.status.site?.name?.trim().slice(0, 1) || '博')
 
 function monthLabel(month: string) {
   const [year, value] = month.split('-')
   return `${year}年${Number(value)}月`
 }
 
+function closeMenu() {
+  menuOpen.value = false
+}
+
+function onScroll() {
+  showTop.value = window.scrollY > 520
+}
+
+function scrollTop() {
+  const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+  window.scrollTo({ top: 0, behavior })
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeMenu()
+}
+
 onMounted(async () => {
+  window.addEventListener('scroll', onScroll, { passive: true })
+  window.addEventListener('keydown', onKeydown)
+  if (!postSlug && !pageSlug) {
+    const site = props.status.site
+    setDocumentMeta(site?.name || '博客', site?.description ?? '', site?.keywords ?? '')
+  }
   try {
-    const response = await listPages(false, 1, 50)
-    pages.value = response.items
+    const collected: Page[] = []
+    let pageNo = 1
+    let total = 0
+    do {
+      const response = await listPages(false, pageNo, 100)
+      collected.push(...response.items)
+      total = response.total
+      pageNo += 1
+    } while (collected.length < total && pageNo <= 20)
+    pages.value = collected
   } catch {
     pages.value = []
   }
@@ -43,41 +80,66 @@ onMounted(async () => {
     recentComments.value = []
   }
 })
+
+onUnmounted(() => {
+  window.removeEventListener('scroll', onScroll)
+  window.removeEventListener('keydown', onKeydown)
+})
 </script>
 
 <template>
-  <div class="public-shell">
-    <header class="public-nav">
-      <a class="brand" href="/user"><span class="brand-mark">T</span> {{ status.site?.name ?? 'Typecho Next' }}</a>
-      <nav><a href="/user" class="active">阅读</a><a v-for="page in pages" :key="page.id" :href="`/page/${page.slug}`">{{ page.title }}</a><a href="/admin">管理</a></nav>
+  <div class="public-shell" :class="{ 'menu-open': menuOpen }">
+    <a class="skip-link" href="#reader-main">跳到正文</a>
+    <header class="public-bar">
+      <button class="nav-toggle" type="button" :aria-expanded="menuOpen" aria-controls="reader-rail" @click="menuOpen = !menuOpen">{{ menuOpen ? '关闭目录' : '目录' }}</button>
+      <a class="brand" href="/user">
+        <span class="brand-mark">{{ brandMark }}</span>
+        <span class="brand-copy">
+          <span class="brand-name">{{ status.site?.name ?? '博客' }}</span>
+          <span v-if="status.site?.description && (postSlug || pageSlug)" class="brand-tagline">{{ status.site.description }}</span>
+        </span>
+      </a>
+      <nav class="site-nav" aria-label="站点" @click="closeMenu">
+        <a href="/user" :class="{ active: !postSlug && !pageSlug }">文章</a>
+        <a v-for="page in pages" :key="page.id" :href="`/page/${page.slug}`" :class="{ active: pageSlug === page.slug }">{{ page.title }}</a>
+        <a href="/admin">管理</a>
+      </nav>
     </header>
-    <main class="public-content">
-      <p v-if="status.site?.description" class="site-description">{{ status.site.description }}</p>
-      <div class="reader-layout">
-        <div class="reader-main">
-          <PageDetailView v-if="pageSlug" />
+    <div v-if="menuOpen" class="rail-backdrop" @click="closeMenu"></div>
+    <div class="public-frame">
+      <aside id="reader-rail" class="reader-rail" :class="{ 'is-open': menuOpen }" aria-label="归档与最新动态">
+        <section aria-label="月份归档">
+          <h2>归档 <span>{{ archive.length }}</span></h2>
+          <a v-for="item in archive" :key="item.month" :href="`/user?month=${item.month}`" @click="closeMenu"><span>{{ monthLabel(item.month) }}</span><small>{{ item.count }}</small></a>
+          <p v-if="archive.length === 0" class="rail-empty">还没有已发布文章</p>
+        </section>
+        <section aria-label="最新文章">
+          <h2>最新文章 <span>{{ recentPosts.length }}</span></h2>
+          <a v-for="post in recentPosts" :key="post.id" :href="`/user/${post.slug}`" @click="closeMenu"><span>{{ post.title }}</span></a>
+          <p v-if="recentPosts.length === 0" class="rail-empty">还没有已发布文章</p>
+        </section>
+        <section aria-label="最近回复">
+          <h2>最近回复 <span>{{ recentComments.length }}</span></h2>
+          <a v-for="comment in recentComments" :key="comment.id" :href="`/user/${comment.postSlug}`" @click="closeMenu"><span>{{ comment.authorName }}：{{ comment.content }}</span></a>
+          <p v-if="recentComments.length === 0" class="rail-empty">还没有已通过的评论</p>
+        </section>
+      </aside>
+      <main class="public-content">
+        <div id="reader-main" class="reader-main" tabindex="-1">
+          <PageDetailView v-if="pageSlug" :status="status" />
           <PostDetailView v-else-if="postSlug" :status="status" />
-          <PostListView v-else :page-size="status.reading?.postsPerPage || 10" />
+          <PostListView v-else :page-size="status.reading?.postsPerPage || 10" :site-name="status.site?.name || ''" :site-description="status.site?.description || ''" />
         </div>
-        <aside class="reader-rail" aria-label="归档与最新动态">
-          <section aria-label="月份归档">
-            <h2>归档</h2>
-            <a v-for="item in archive" :key="item.month" :href="`/user?month=${item.month}`">{{ monthLabel(item.month) }} <small>{{ item.count }}</small></a>
-            <p v-if="archive.length === 0" class="rail-empty">还没有已发布文章</p>
-          </section>
-          <section aria-label="最新文章">
-            <h2>最新文章</h2>
-            <a v-for="post in recentPosts" :key="post.id" :href="`/user/${post.slug}`">{{ post.title }}</a>
-            <p v-if="recentPosts.length === 0" class="rail-empty">还没有已发布文章</p>
-          </section>
-          <section aria-label="最近回复">
-            <h2>最近回复</h2>
-            <a v-for="comment in recentComments" :key="comment.id" :href="`/user/${comment.postSlug}`">{{ comment.authorName }}：{{ comment.content }}</a>
-            <p v-if="recentComments.length === 0" class="rail-empty">还没有已通过的评论</p>
-          </section>
-        </aside>
-      </div>
-    </main>
-    <footer class="public-footer"><span>Built for the next chapter.</span><span>v{{ status.version }}</span></footer>
+        <footer class="public-footer">
+          <span>{{ status.site?.name ?? '博客' }}</span>
+          <nav aria-label="订阅与地图">
+            <a href="/feed.xml">订阅</a>
+            <a href="/sitemap.xml">站点地图</a>
+          </nav>
+          <span>v{{ status.version }}</span>
+        </footer>
+      </main>
+    </div>
+    <button v-show="showTop && !menuOpen" class="to-top" type="button" @click="scrollTop">回到顶部</button>
   </div>
 </template>

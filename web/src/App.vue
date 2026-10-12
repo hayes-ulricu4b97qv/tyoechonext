@@ -43,8 +43,8 @@ onMounted(async () => {
 
 <template>
   <div v-if="loading" class="app-loading">
-    <div class="mark">T</div>
-    <span>正在启动新架构…</span>
+    <div class="mark">笔</div>
+    <span>正在铺开这一页…</span>
   </div>
   <div v-else-if="error" class="app-loading">
     <div class="mark mark-error">!</div>

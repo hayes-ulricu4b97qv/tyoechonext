@@ -175,11 +175,11 @@ func assertSetupRows(t *testing.T, dbPath string) {
 	defer db.Close()
 	var admins, users, legacyPosts int
 	var username, email, role, siteName string
-	if err := db.QueryRow(`SELECT COUNT(*) FROM admins`).Scan(&admins); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'admins'`).Scan(&admins); err != nil {
 		t.Fatal(err)
 	}
 	if admins != 0 {
-		t.Fatalf("setup seeded %d singleton admin rows", admins)
+		t.Fatalf("new database still creates an admins table")
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
 		t.Fatal(err)

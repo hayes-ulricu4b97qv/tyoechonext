@@ -31,6 +31,14 @@ export function logout() {
   return api<void>('/api/v1/auth/logout', { method: 'POST' })
 }
 
+export function forgotPassword(username: string) {
+  return postJSON<{ status: string; message: string }>('/api/v1/auth/forgot', { username })
+}
+
+export function resetPassword(token: string, password: string) {
+  return postJSON<{ reset: boolean }>('/api/v1/auth/reset', { token, password })
+}
+
 export function setup(input: SetupInput) {
   return postJSON('/api/v1/setup', input)
 }

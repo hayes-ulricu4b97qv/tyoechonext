@@ -44,13 +44,6 @@ func (r *SQLiteRepository) migrate() error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS admins (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			username TEXT NOT NULL UNIQUE,
-			password_hash TEXT NOT NULL,
-			email TEXT NOT NULL,
-			created_at TEXT NOT NULL
-		)`,
 		`CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
@@ -141,6 +134,34 @@ func (r *SQLiteRepository) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at DESC, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS audit_events_resource_idx ON audit_events(resource_type, action, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS search_tokens (
+			kind TEXT NOT NULL,
+			token TEXT NOT NULL,
+			record_id TEXT NOT NULL,
+			PRIMARY KEY (kind, token, record_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS post_revisions (
+			id TEXT PRIMARY KEY,
+			post_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			excerpt TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS post_revisions_post_idx ON post_revisions(post_id, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS outbound_mail (
+			id TEXT PRIMARY KEY,
+			recipient TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			body TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS password_resets (
+			token_hash TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := r.db.Exec(statement); err != nil {
@@ -176,6 +197,23 @@ func (r *SQLiteRepository) migrate() error {
 	}
 	if _, err := r.db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("record site profile migration: %w", err)
+	}
+	if err := r.ensurePassphraseColumn(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *SQLiteRepository) ensurePassphraseColumn() error {
+	names, err := r.columnNames("posts")
+	if err != nil {
+		return err
+	}
+	if names["passphrase_hash"] {
+		return nil
+	}
+	if _, err := r.db.Exec(`ALTER TABLE posts ADD COLUMN passphrase_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add posts.passphrase_hash: %w", err)
 	}
 	return nil
 }

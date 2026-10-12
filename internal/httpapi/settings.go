@@ -245,7 +245,10 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r) {
 		return
 	}
-	page, pageSize := pagination(r)
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
 	events, err := s.app.ListAudit(r.URL.Query().Get("action"), r.URL.Query().Get("resourceType"), page, pageSize)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read audit events")

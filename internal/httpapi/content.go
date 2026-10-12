@@ -13,10 +13,18 @@ import (
 )
 
 func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
-	page, pageSize := s.readingPage(r)
+	page, pageSize, err := s.readingPage(r)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	includeDrafts := r.URL.Query().Get("includeDraft") == "true"
+	if includeDrafts && !s.requireContentEditor(w, r) {
+		return
+	}
 	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
-	posts, err := s.app.ListPostsByTerms(r.URL.Query().Get("q"), category, tag, r.URL.Query().Get("month"), r.URL.Query().Get("order"), s.canEditContent(r), page, pageSize)
+	posts, err := s.app.ListPostsByTerms(r.URL.Query().Get("q"), category, tag, r.URL.Query().Get("month"), r.URL.Query().Get("order"), includeDrafts, page, pageSize)
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
@@ -39,7 +47,10 @@ func (s *Server) listArchive(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) listRecentComments(w http.ResponseWriter, r *http.Request) {
-	page, pageSize := pagination(r)
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
 	comments, err := s.app.RecentApprovedComments(page, pageSize)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read recent comments")
@@ -53,7 +64,10 @@ func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
 	if includeDrafts && !s.requireContentEditor(w, r) {
 		return
 	}
-	page, pageSize := pagination(r)
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
 	pages, err := s.app.ListPages(r.URL.Query().Get("q"), includeDrafts, page, pageSize)
 	if err != nil {
 		status, code := serviceError(err)
@@ -68,7 +82,10 @@ func (s *Server) listTerms(w http.ResponseWriter, r *http.Request) {
 	if includeDrafts && !s.requireContentEditor(w, r) {
 		return
 	}
-	page, pageSize := pagination(r)
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
 	terms, err := s.app.ListTerms(r.URL.Query().Get("kind"), r.URL.Query().Get("q"), includeDrafts, page, pageSize)
 	if err != nil {
 		status, code := serviceError(err)
@@ -159,7 +176,8 @@ func (s *Server) getPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read neighboring posts")
 		return
 	}
-	writeJSON(w, http.StatusOK, publicPostWithNeighbors(post, previous, next))
+	withBody := s.app.RevealPost(post, s.canEditContent(r), r.Header.Get("X-Post-Passphrase"))
+	writeJSON(w, http.StatusOK, publicPostWithNeighbors(post, previous, next, withBody))
 }
 
 func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +194,10 @@ func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
-	page, pageSize := pagination(r)
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
 	includePending := r.URL.Query().Get("includePending") == "true" && s.canModerate(r)
 	comments, err := s.app.ListComments(r.PathValue("slug"), includePending, page, pageSize)
 	if errors.Is(err, store.ErrNotFound) {
@@ -204,6 +225,10 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if !s.allowComment(r) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "尝试过于频繁，请稍后再试")
+		return
+	}
 	comment, err := s.app.CreateComment(r.PathValue("slug"), service.CommentInput{
 		AuthorName:  input.AuthorName,
 		AuthorEmail: input.AuthorEmail,
@@ -228,7 +253,10 @@ func (s *Server) listAllComments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireModerator(w, r) {
 		return
 	}
-	page, pageSize := pagination(r)
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
 	comments, err := s.app.ListAllComments(r.URL.Query().Get("status"), page, pageSize)
 	if err != nil {
 		status, code := serviceError(err)
@@ -283,7 +311,10 @@ func (s *Server) listMedia(w http.ResponseWriter, r *http.Request) {
 	if !s.requireContentEditor(w, r) {
 		return
 	}
-	page, pageSize := pagination(r)
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
 	media, err := s.app.ListMedia(page, pageSize)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read media")
@@ -459,14 +490,19 @@ func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	created, err := s.app.CreatePost(applyAllowComment(input.post(), input, true))
+	post, err := input.post()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	created, err := s.app.CreatePost(applyAllowComment(post, input, true))
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
 		return
 	}
 	s.recordAudit(r, "post.created", "post", created.ID, map[string]string{"status": created.Status})
-	writeJSON(w, http.StatusCreated, publicPost(created))
+	writeJSON(w, http.StatusCreated, publicPost(created, true))
 }
 
 func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
@@ -487,14 +523,19 @@ func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	updated, err := s.app.UpdatePost(post.ID, applyAllowComment(input.post(), input, post.AllowComment))
+	nextPost, err := input.post()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	updated, err := s.app.UpdatePost(post.ID, applyAllowComment(nextPost, input, post.AllowComment))
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
 		return
 	}
 	s.recordAudit(r, "post.updated", "post", updated.ID, map[string]string{"status": updated.Status})
-	writeJSON(w, http.StatusOK, publicPost(updated))
+	writeJSON(w, http.StatusOK, publicPost(updated, true))
 }
 
 func (s *Server) deletePost(w http.ResponseWriter, r *http.Request) {

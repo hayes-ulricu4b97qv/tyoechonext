@@ -33,7 +33,7 @@ func (s *Service) uniqueSlug(raw, title, currentID string) (string, error) {
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("%w: unable to allocate a unique slug", ErrValidation)
+	return "", fmt.Errorf("%w: 无法分配唯一的固定链接", ErrValidation)
 }
 
 func (s *Service) uniquePageSlug(raw, title, currentID string) (string, error) {
@@ -55,24 +55,24 @@ func (s *Service) uniquePageSlug(raw, title, currentID string) (string, error) {
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("%w: unable to allocate a unique page slug", ErrValidation)
+	return "", fmt.Errorf("%w: 无法分配唯一的页面固定链接", ErrValidation)
 }
 
 func validateSetup(input SetupInput) error {
 	if strings.TrimSpace(input.SiteName) == "" || len(strings.TrimSpace(input.SiteName)) > 80 {
-		return fmt.Errorf("%w: siteName must be between 1 and 80 characters", ErrValidation)
+		return fmt.Errorf("%w: 站点名称需要 1 到 80 个字符", ErrValidation)
 	}
 	if !validURL(input.SiteURL) {
-		return fmt.Errorf("%w: siteUrl must be a valid http or https URL", ErrValidation)
+		return fmt.Errorf("%w: 站点地址必须是有效的 http 或 https 地址", ErrValidation)
 	}
 	if !usernamePattern.MatchString(input.AdminUsername) {
-		return fmt.Errorf("%w: adminUsername must be 3-32 characters and use letters, numbers, _ or -", ErrValidation)
+		return fmt.Errorf("%w: 用户名需要 3 到 32 个字符，只能使用字母、数字、_ 或 -", ErrValidation)
 	}
 	if len(input.AdminPassword) < 8 {
-		return fmt.Errorf("%w: adminPassword must be at least 8 characters", ErrValidation)
+		return fmt.Errorf("%w: 密码至少 8 个字符", ErrValidation)
 	}
 	if !validEmail(input.AdminEmail) {
-		return fmt.Errorf("%w: adminEmail must be a valid email address", ErrValidation)
+		return fmt.Errorf("%w: 邮箱格式不正确", ErrValidation)
 	}
 	return nil
 }
@@ -82,7 +82,7 @@ func validatePost(post store.Post) error {
 		return err
 	}
 	if post.Status != "" && post.Status != "draft" && post.Status != "published" {
-		return fmt.Errorf("%w: status must be draft or published", ErrValidation)
+		return fmt.Errorf("%w: 状态只能是草稿或已发布", ErrValidation)
 	}
 	if err := validateTermNames(post.Categories, "category"); err != nil {
 		return err
@@ -98,7 +98,7 @@ func validatePage(page store.Page) error {
 		return err
 	}
 	if page.Status != "" && page.Status != "draft" && page.Status != "published" {
-		return fmt.Errorf("%w: status must be draft or published", ErrValidation)
+		return fmt.Errorf("%w: 状态只能是草稿或已发布", ErrValidation)
 	}
 	return nil
 }
@@ -106,16 +106,16 @@ func validatePage(page store.Page) error {
 func validateContentFields(title, slug, excerpt, content string) error {
 	titleLength := runeLength(strings.TrimSpace(title))
 	if titleLength < 1 || titleLength > 200 {
-		return fmt.Errorf("%w: title must be between 1 and 200 characters", ErrValidation)
+		return fmt.Errorf("%w: 标题需要 1 到 200 个字符", ErrValidation)
 	}
 	if runeLength(strings.TrimSpace(slug)) > 120 {
-		return fmt.Errorf("%w: slug must be at most 120 characters", ErrValidation)
+		return fmt.Errorf("%w: 固定链接最多 120 个字符", ErrValidation)
 	}
 	if runeLength(excerpt) > 500 {
-		return fmt.Errorf("%w: excerpt must be at most 500 characters", ErrValidation)
+		return fmt.Errorf("%w: 摘要最多 500 个字符", ErrValidation)
 	}
 	if runeLength(content) > MaxContentRunes {
-		return fmt.Errorf("%w: content must be at most %d characters", ErrValidation, MaxContentRunes)
+		return fmt.Errorf("%w: 正文最多 %d 个字符", ErrValidation, MaxContentRunes)
 	}
 	return nil
 }
@@ -146,11 +146,11 @@ func normalizeTerms(input []store.Term, kind string) []store.Term {
 
 func validateTermNames(terms []store.Term, kind string) error {
 	if len(terms) > 20 {
-		return fmt.Errorf("%w: at most 20 %s terms are allowed", ErrValidation, kind)
+		return fmt.Errorf("%w: 最多 20 个%s", ErrValidation, termKindLabel(kind))
 	}
 	for _, term := range terms {
 		if runeLength(strings.TrimSpace(term.Name)) < 1 || runeLength(strings.TrimSpace(term.Name)) > 60 {
-			return fmt.Errorf("%w: %s names must be between 1 and 60 characters", ErrValidation, kind)
+			return fmt.Errorf("%w: %s名称需要 1 到 60 个字符", ErrValidation, termKindLabel(kind))
 		}
 	}
 	return nil
@@ -160,10 +160,10 @@ func validateTermInput(input TermInput) error {
 	kind := strings.TrimSpace(input.Kind)
 	name := strings.TrimSpace(input.Name)
 	if kind != "category" && kind != "tag" {
-		return fmt.Errorf("%w: kind must be category or tag", ErrValidation)
+		return fmt.Errorf("%w: 类型只能是分类或标签", ErrValidation)
 	}
 	if runeLength(name) < 1 || runeLength(name) > 60 {
-		return fmt.Errorf("%w: term name must be between 1 and 60 characters", ErrValidation)
+		return fmt.Errorf("%w: 名称需要 1 到 60 个字符", ErrValidation)
 	}
 	return nil
 }
@@ -174,18 +174,29 @@ func validCommentStatus(status string) bool {
 
 func validateUserInput(input UserInput, creating bool) error {
 	if creating && !usernamePattern.MatchString(input.Username) {
-		return fmt.Errorf("%w: username must be 3-32 characters and use letters, numbers, _ or -", ErrValidation)
+		return fmt.Errorf("%w: 用户名需要 3 到 32 个字符，只能使用字母、数字、_ 或 -", ErrValidation)
 	}
 	if !validEmail(input.Email) {
-		return fmt.Errorf("%w: email must be a valid email address", ErrValidation)
+		return fmt.Errorf("%w: 邮箱格式不正确", ErrValidation)
 	}
 	if creating && len(input.Password) < 8 {
-		return fmt.Errorf("%w: password must be at least 8 characters", ErrValidation)
+		return fmt.Errorf("%w: 密码至少 8 个字符", ErrValidation)
 	}
 	if !validStaffRole(input.Role) {
-		return fmt.Errorf("%w: role must be editor or moderator", ErrValidation)
+		return fmt.Errorf("%w: 角色只能是编辑或审核员", ErrValidation)
 	}
 	return nil
+}
+
+func termKindLabel(kind string) string {
+	switch kind {
+	case "category":
+		return "分类"
+	case "tag":
+		return "标签"
+	default:
+		return "分类或标签"
+	}
 }
 
 func validStaffRole(role string) bool {

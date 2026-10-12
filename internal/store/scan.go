@@ -19,7 +19,7 @@ func scanPost(row scanner) (Post, error) {
 	var post Post
 	var allowComment int
 	var publishedAt, updatedAt sql.NullString
-	err := row.Scan(&post.ID, &post.Title, &post.Slug, &post.Excerpt, &post.Content, &post.Status, &allowComment, &publishedAt, &updatedAt)
+	err := row.Scan(&post.ID, &post.Title, &post.Slug, &post.Excerpt, &post.Content, &post.Status, &allowComment, &publishedAt, &updatedAt, &post.PassphraseHash)
 	if err != nil {
 		return Post{}, err
 	}

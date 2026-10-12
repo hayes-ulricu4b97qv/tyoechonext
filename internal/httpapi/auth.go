@@ -3,6 +3,8 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/service"
 )
@@ -68,15 +70,21 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	key := strings.ToLower(strings.TrimSpace(request.Username))
 	admin, err := s.app.Authenticate(request.Username, request.Password)
 	if err != nil && !errors.Is(err, service.ErrInvalidCredentials) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read administrator account")
 		return
 	}
 	if errors.Is(err, service.ErrInvalidCredentials) || admin == nil {
+		if s.loginFailures.RecordFailure(key, s.loginFailureLimit(), 10*time.Minute) {
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "尝试过于频繁，请稍后再试")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Username or password is incorrect")
 		return
 	}
+	s.loginFailures.Reset(key)
 	if err := s.issueSession(w, admin.Username); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
 		return

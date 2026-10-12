@@ -28,3 +28,6 @@ prepros.config
 node_modules/
 web/dist/
 data/
+bin/
+/typecho-next.exe
+.e2e-artifacts/

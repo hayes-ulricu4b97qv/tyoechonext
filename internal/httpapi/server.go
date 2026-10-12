@@ -40,12 +40,14 @@ const (
 )
 
 type Server struct {
-	repo      store.Repository
-	app       *service.Service
-	settings  config.Settings
-	logger    *slog.Logger
-	webDir    string
-	mediaRoot string
+	repo          store.Repository
+	app           *service.Service
+	settings      config.Settings
+	logger        *slog.Logger
+	webDir        string
+	mediaRoot     string
+	loginFailures *service.HitCounter
+	commentHits   *service.HitCounter
 }
 
 func NewServer(repo store.Repository, settings config.Settings, logger *slog.Logger) *Server {
@@ -65,12 +67,14 @@ func NewServer(repo store.Repository, settings config.Settings, logger *slog.Log
 		mediaRoot = filepath.Join(dataDir, "uploads")
 	}
 	return &Server{
-		repo:      repo,
-		app:       service.New(repo),
-		settings:  settings,
-		logger:    logger,
-		webDir:    webDir,
-		mediaRoot: mediaRoot,
+		repo:          repo,
+		app:           service.New(repo),
+		settings:      settings,
+		logger:        logger,
+		webDir:        webDir,
+		mediaRoot:     mediaRoot,
+		loginFailures: service.NewHitCounter(),
+		commentHits:   service.NewHitCounter(),
 	}
 }
 
@@ -84,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/system/status", s.systemStatus)
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	mux.HandleFunc("POST /api/v1/auth/forgot", s.forgotPassword)
+	mux.HandleFunc("POST /api/v1/auth/reset", s.resetPassword)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)
 	mux.HandleFunc("GET /api/v1/content/posts", s.listPosts)
@@ -98,6 +104,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/content/terms", s.createTerm)
 	mux.HandleFunc("PUT /api/v1/content/terms/{id}", s.updateTerm)
 	mux.HandleFunc("DELETE /api/v1/content/terms/{id}", s.deleteTerm)
+	mux.HandleFunc("GET /api/v1/content/posts/{id}/revisions", s.listPostRevisions)
+	mux.HandleFunc("POST /api/v1/content/posts/{id}/revisions/{revisionID}/restore", s.restorePostRevision)
 	mux.HandleFunc("GET /api/v1/content/posts/{slug}", s.getPost)
 	mux.HandleFunc("GET /api/v1/content/posts/{slug}/comments", s.listComments)
 	mux.HandleFunc("POST /api/v1/content/posts/{slug}/comments", s.createComment)
@@ -122,6 +130,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/settings/users/{username}", s.updateUser)
 	mux.HandleFunc("DELETE /api/v1/settings/users/{username}", s.deleteUser)
 	mux.HandleFunc("GET /api/v1/audit", s.listAudit)
+	mux.HandleFunc("GET /api/v1/backup", s.backup)
 	mux.HandleFunc("/", s.frontend)
 
 	return requestLog(s.routeGuard(mux), s.logger)
@@ -129,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routeGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		s.ensureCSRFCookie(w, r)
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/feed.xml" || r.URL.Path == "/sitemap.xml" || r.URL.Path == "/robots.txt" || r.URL.Path == "/api/v1/system/status" || r.URL.Path == "/api/v1/setup" || r.URL.Path == "/api/v1/auth/login" || strings.HasPrefix(r.URL.Path, "/assets/") || r.URL.Path == "/favicon.svg" {
 			next.ServeHTTP(w, r)
@@ -233,7 +243,7 @@ type rssGUID struct {
 	IsPermaLink bool   `xml:"isPermaLink,attr"`
 }
 
-func (s *Server) feed(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 	site, err := s.app.Site()
 	if errors.Is(err, store.ErrNotFound) || site == nil {
 		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
@@ -243,30 +253,37 @@ func (s *Server) feed(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
 		return
 	}
-	posts, err := s.app.ListPosts("", false, 1, 20)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
-		return
-	}
 	baseURL := strings.TrimRight(site.URL, "/")
-	items := make([]rssItem, 0, len(posts.Items))
-	for _, post := range posts.Items {
-		publishedAt := post.PublishedAt
-		if publishedAt.IsZero() {
-			publishedAt = post.UpdatedAt
+	editor := s.canEditContent(r)
+	passphrase := r.Header.Get("X-Post-Passphrase")
+	items := make([]rssItem, 0)
+	for page := 1; ; page++ {
+		posts, err := s.app.ListPosts("", false, page, 100)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
+			return
 		}
-		permalink := baseURL + "/user/" + url.PathEscape(post.Slug)
-		description := post.Excerpt
-		if description == "" {
-			description = post.Content
+		for _, post := range posts.Items {
+			publishedAt := post.PublishedAt
+			if publishedAt.IsZero() {
+				publishedAt = post.UpdatedAt
+			}
+			permalink := baseURL + "/user/" + url.PathEscape(post.Slug)
+			content := ""
+			if s.app.RevealPost(post, editor, passphrase) {
+				content = post.Content
+			}
+			items = append(items, rssItem{
+				Title:       post.Title,
+				Link:        permalink,
+				GUID:        rssGUID{Value: permalink, IsPermaLink: true},
+				Description: service.FeedBlurb(post.Excerpt, content),
+				PubDate:     publishedAt.UTC().Format(time.RFC1123Z),
+			})
 		}
-		items = append(items, rssItem{
-			Title:       post.Title,
-			Link:        permalink,
-			GUID:        rssGUID{Value: permalink, IsPermaLink: true},
-			Description: description,
-			PubDate:     publishedAt.UTC().Format(time.RFC1123Z),
-		})
+		if len(posts.Items) == 0 || posts.PageSize <= 0 || len(posts.Items) < posts.PageSize {
+			break
+		}
 	}
 	feed := rssFeed{
 		Version: "2.0",
@@ -371,7 +388,7 @@ func (s *Server) robots(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
 		return
 	}
-	lines := []string{"User-agent: *", "Allow: /"}
+	lines := []string{"User-agent: *", "Allow: /", "Disallow: /admin", "Disallow: /setting"}
 	if site != nil && strings.TrimSpace(site.URL) != "" {
 		lines = append(lines, "Sitemap: "+strings.TrimRight(site.URL, "/")+"/sitemap.xml")
 	}
@@ -407,10 +424,12 @@ type postRequest struct {
 	AllowComment *bool    `json:"allowComment"`
 	Categories   []string `json:"categories"`
 	Tags         []string `json:"tags"`
+	PublishAt    *string  `json:"publishAt"`
+	Passphrase   *string  `json:"passphrase"`
 }
 
-func (input postRequest) post() store.Post {
-	return store.Post{
+func (input postRequest) post() (store.Post, error) {
+	post := store.Post{
 		Title:      input.Title,
 		Slug:       input.Slug,
 		Excerpt:    input.Excerpt,
@@ -419,6 +438,22 @@ func (input postRequest) post() store.Post {
 		Categories: termInputs(input.Categories, "category"),
 		Tags:       termInputs(input.Tags, "tag"),
 	}
+	if input.PublishAt != nil && strings.TrimSpace(*input.PublishAt) != "" {
+		raw := strings.TrimSpace(*input.PublishAt)
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			parsed, err = time.Parse(time.RFC3339, raw)
+		}
+		if err != nil {
+			return store.Post{}, fmt.Errorf("%w: 发布时间格式无效", service.ErrValidation)
+		}
+		post.RequestedPublishAt = parsed.UTC()
+	}
+	if input.Passphrase != nil {
+		post.SetPassphrase = true
+		post.PassphrasePlain = *input.Passphrase
+	}
+	return post, nil
 }
 
 func applyAllowComment(post store.Post, input postRequest, fallback bool) store.Post {
@@ -555,7 +590,7 @@ func (s *Server) issueSession(w http.ResponseWriter, username string) error {
 		return err
 	}
 	token := hex.EncodeToString(tokenBytes)
-	expires := time.Now().Add(time.Duration(s.settings.SessionTTLMin) * time.Minute)
+	expires := time.Now().Add(s.sessionTTL())
 	if err := s.app.CreateSession(username, token, expires); err != nil {
 		return err
 	}
@@ -584,11 +619,8 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cleanPath == "/admin" || strings.HasPrefix(cleanPath, "/admin/") || cleanPath == "/user" || strings.HasPrefix(cleanPath, "/user/") || cleanPath == "/page" || strings.HasPrefix(cleanPath, "/page/") || cleanPath == "/setting" || strings.HasPrefix(cleanPath, "/setting/") {
-		index := path.Join(s.webDir, "index.html")
-		if _, err := os.Stat(index); err == nil {
-			http.ServeFile(w, r, index)
-			return
-		}
+		s.serveAppShell(w, r, cleanPath)
+		return
 	}
 	http.NotFound(w, r)
 }
@@ -603,28 +635,46 @@ func serviceError(err error) (int, string) {
 	return http.StatusInternalServerError, "save_failed"
 }
 
-func (s *Server) readingPage(r *http.Request) (int, int) {
-	page, pageSize := pagination(r)
+func (s *Server) readingPage(r *http.Request) (int, int, error) {
+	page, pageSize, err := pagination(r)
+	if err != nil {
+		return 0, 0, err
+	}
 	if strings.TrimSpace(r.URL.Query().Get("pageSize")) != "" {
-		return page, pageSize
+		return page, pageSize, nil
 	}
 	site, err := s.app.Site()
 	if err != nil || site == nil || site.PostsPerPage < 1 || site.PostsPerPage > 50 {
-		return page, pageSize
+		return page, pageSize, nil
 	}
-	return page, site.PostsPerPage
+	return page, site.PostsPerPage, nil
 }
 
-func pagination(r *http.Request) (int, int) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
-	if page < 1 {
-		page = 1
+func (s *Server) pages(w http.ResponseWriter, r *http.Request) (int, int, bool) {
+	page, pageSize, err := pagination(r)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return 0, 0, false
 	}
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
+	return page, pageSize, true
+}
+
+func pagination(r *http.Request) (int, int, error) {
+	page := 1
+	if raw := strings.TrimSpace(r.URL.Query().Get("page")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			page = parsed
+		}
 	}
-	return page, pageSize
+	pageSize := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("pageSize")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			return 0, 0, fmt.Errorf("%w: pageSize 必须是 1 到 100 的整数", service.ErrValidation)
+		}
+		pageSize = parsed
+	}
+	return page, pageSize, nil
 }
 
 func feedDescription(site *store.Site) string {
@@ -683,7 +733,8 @@ type postResponse struct {
 	Title        string                `json:"title"`
 	Slug         string                `json:"slug"`
 	Excerpt      string                `json:"excerpt"`
-	Content      string                `json:"content"`
+	Content      *string               `json:"content,omitempty"`
+	Locked       bool                  `json:"locked,omitempty"`
 	Status       string                `json:"status"`
 	AllowComment bool                  `json:"allowComment"`
 	Categories   []termResponse        `json:"categories,omitempty"`
@@ -741,8 +792,8 @@ type pagePageResponse struct {
 	PageSize int            `json:"pageSize"`
 }
 
-func publicPostWithNeighbors(post store.Post, previous, next *store.Post) postResponse {
-	response := publicPost(post)
+func publicPostWithNeighbors(post store.Post, previous, next *store.Post, withBody bool) postResponse {
+	response := publicPost(post, withBody)
 	response.Previous = publicNeighbor(previous)
 	response.Next = publicNeighbor(next)
 	return response
@@ -760,16 +811,20 @@ func publicNeighbor(post *store.Post) *postNeighborResponse {
 	return response
 }
 
-func publicPost(post store.Post) postResponse {
+func publicPost(post store.Post, withBody bool) postResponse {
 	response := postResponse{
 		ID:           post.ID,
 		Title:        post.Title,
 		Slug:         post.Slug,
 		Excerpt:      post.Excerpt,
-		Content:      post.Content,
 		Status:       post.Status,
 		AllowComment: post.AllowComment,
+		Locked:       post.PassphraseHash != "",
 		UpdatedAt:    post.UpdatedAt,
+	}
+	if withBody {
+		content := post.Content
+		response.Content = &content
 	}
 	response.Categories = publicTerms(post.Categories)
 	response.Tags = publicTerms(post.Tags)
@@ -799,7 +854,7 @@ func publicTermPage(page store.TermPage) termPageResponse {
 func publicPostPage(page store.PostPage) postPageResponse {
 	items := make([]postResponse, 0, len(page.Items))
 	for _, post := range page.Items {
-		items = append(items, publicPost(post))
+		items = append(items, publicPost(post, false))
 	}
 	return postPageResponse{Items: items, Total: page.Total, Page: page.Page, PageSize: page.PageSize}
 }
@@ -989,13 +1044,36 @@ func writeXML(w http.ResponseWriter, status int, contentType string, value any) 
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": localize(message)}})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	if w.wrote {
+		return
+	}
+	w.status = status
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(payload []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(payload)
 }
 
 func requestLog(next http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(w, r)
-		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(started).Milliseconds())
+		recorder := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "status", recorder.status, "duration_ms", time.Since(started).Milliseconds())
 	})
 }

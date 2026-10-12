@@ -1,6 +1,7 @@
 # Typecho Next
 
-Typecho Next is a Go API with a Vue 3 + TypeScript client.
+Typecho Next is a personal publishing platform with a Go API and a Vue 3 + TypeScript client.
+Windows is the only supported development and deployment platform.
 
 ## Product entry points
 
@@ -9,7 +10,7 @@ Typecho Next is a Go API with a Vue 3 + TypeScript client.
 - `/user` — public reader experience
 - `/user/{slug}` — public article detail and comments
 - `/page/{slug}` — public static page
-- `/feed.xml` / `/sitemap.xml` — public feed and search indexing endpoints
+- `/feed.xml` / `/sitemap.xml` / `/robots.txt` — public feed, sitemap, and crawler rules
 - `/api/v1` — versioned JSON API
 - `/healthz` / `/readyz` — liveness and readiness checks
 
@@ -17,7 +18,7 @@ The service redirects every page to `/setting` until setup creates the site and 
 
 ## Quick start
 
-```bash
+```powershell
 cd web
 npm ci
 npm run build
@@ -27,35 +28,24 @@ go run ./cmd/server
 
 Open <http://localhost:8080/setting> and complete the setup form. For development, run Vite with `cd web && npm run dev`; `/api` is proxied to the Go service.
 
-## Container
-
-```bash
-docker build -t typecho-next .
-docker run --rm -p 8080:8080 -v typecho-data:/app/data typecho-next
-```
-
-在受限网络的构建环境中，把环境提供的代理 CA 作为 BuildKit secret 传入：
-
-```bash
-docker build --secret id=proxy_ca,src="$CODEX_PROXY_CERT" -t typecho-next .
-```
-
 See [docs/architecture.md](docs/architecture.md) for the module boundaries.
+See [docs/operations.md](docs/operations.md) for native deployment, configuration, backups and recovery.
 
 ## Runtime requirements
 
 * Go 1.22 or newer
-* Node.js 20 or newer for the Vue build
-* GCC or another C toolchain for local SQLite builds (the Docker image includes it)
-* A writable `APP_DATA_DIR` (the container uses `/app/data`)
+* Windows with PowerShell
+* Node.js 22 or newer for the Vue build
+* GCC (MinGW-w64) on PATH for CGO SQLite builds
+* A writable `APP_DATA_DIR` and `APP_MEDIA_DIR`
 
-SQLite is the single-node persistence adapter. The repository interface keeps the API boundary ready for another adapter when multi-node deployment is needed.
+SQLite stores this personal blog's content, accounts and sessions. Media files are stored in `APP_MEDIA_DIR`.
 
-Article listing accepts `q`, `page`, and `pageSize`. Sessions are persisted in SQLite with only a SHA-256 token hash stored server side. Each session references `users.id`, so a login remains valid for a later request against the same database.
+Article listing accepts `q`, `category`, `tag`, `month`, `order` (`published` by default, or `updated`), `page`, and `pageSize`. An explicit `pageSize` outside 1–100 is rejected. Sessions are persisted in SQLite with only a SHA-256 token hash stored server side. Each session references `users.id`, so a login remains valid for a later request against the same database. `APP_SESSION_TTL_MIN` sets the session lifetime in minutes (default 1440).
 Search terms are treated literally, including `%` and `_`.
 
-Posts support comma-separated categories and tags. The Go service stores them in normalized taxonomy tables and exposes published term counts through `GET /api/v1/content/terms`. Content editors can manage terms with `POST/PUT/DELETE /api/v1/content/terms`.
-Post lists can be filtered with `category=<slug>` and/or `tag=<slug>`; when both are present, the API returns their intersection.
+Posts accept `categories` and `tags` as JSON string arrays. The Go service stores them in normalized taxonomy tables and exposes published term counts through `GET /api/v1/content/terms`. Content editors can manage terms with `POST/PUT/DELETE /api/v1/content/terms`. The admin form splits a comma-separated field into those arrays before sending the request.
+Post lists can be filtered with `category=<slug>` and/or `tag=<slug>`; when both are present, the API returns their intersection. `month=YYYY-MM` limits the list to that archive month.
 The Vue reader exposes published categories, tags, and search terms as shareable URL filters.
 Article details render Markdown content in Vue and sanitize generated HTML before insertion.
 The Go service validates content limits: titles up to 200 characters, slugs up to 120, excerpts up to 500, and bodies up to 500,000 characters.
@@ -63,7 +53,7 @@ Content editors can create independent pages through `GET/POST /api/v1/content/p
 When editing an article without a slug, the existing permalink is preserved; only new articles derive a slug from the title. Automatic slugs preserve Unicode letters and digits, so non-Latin titles and taxonomy names keep stable readable URLs.
 Editors can preview drafts from the admin list; draft routes remain unavailable to anonymous readers.
 
-Go directly serves `/feed.xml`, `/sitemap.xml`, and `/robots.txt` from published posts, pages, taxonomy pages, and site settings.
+Go serves `/feed.xml` from published posts only. Each item uses the post's published time, and the description is the excerpt or a truncated body. `/sitemap.xml` lists the reader home, published posts, published terms, and published pages. `/robots.txt` allows `/`, disallows `/admin` and `/setting`, and adds a `Sitemap` line when the site URL is set.
 
 Owner accounts can inspect management history through `GET /api/v1/audit`; successful content, media, comment, user, account, and site changes record the actor and resource.
 Write requests use a double-submit CSRF token; the Vue API client copies the token from the non-HttpOnly cookie into `X-CSRF-Token`. Initial setup and login are the only unauthenticated write entry points that do not require a prior token.

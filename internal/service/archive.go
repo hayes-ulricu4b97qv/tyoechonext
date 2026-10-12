@@ -13,7 +13,7 @@ func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order s
 	tagSlug = strings.TrimSpace(tagSlug)
 	order = strings.TrimSpace(order)
 	if order != "" && order != "updated" && order != "published" {
-		return store.PostPage{}, fmt.Errorf("%w: order must be updated or published", ErrValidation)
+		return store.PostPage{}, fmt.Errorf("%w: 排序只能是 updated 或 published", ErrValidation)
 	}
 	query := store.PostQuery{
 		Search:        search,
@@ -34,6 +34,18 @@ func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order s
 		query.IDs = ids
 	}
 	return s.repo.SearchPosts(query)
+}
+
+func FeedBlurb(excerpt, content string) string {
+	if text := strings.TrimSpace(excerpt); text != "" {
+		return text
+	}
+	runes := []rune(content)
+	const limit = 280
+	if len(runes) <= limit {
+		return content
+	}
+	return string(runes[:limit]) + "…"
 }
 
 func (s *Service) MonthArchive() ([]store.MonthCount, error) {
@@ -135,7 +147,7 @@ func monthWindow(month string, loc *time.Location) (time.Time, time.Time, error)
 	}
 	parsed, err := time.ParseInLocation("2006-01", month, loc)
 	if err != nil || parsed.Format("2006-01") != month {
-		return time.Time{}, time.Time{}, fmt.Errorf("%w: month must be YYYY-MM", ErrValidation)
+		return time.Time{}, time.Time{}, fmt.Errorf("%w: 月份格式必须是 YYYY-MM", ErrValidation)
 	}
 	return parsed, parsed.AddDate(0, 1, 0), nil
 }

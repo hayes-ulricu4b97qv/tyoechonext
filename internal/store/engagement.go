@@ -8,12 +8,7 @@ import (
 )
 
 func (r *SQLiteRepository) ListComments(query CommentQuery) (CommentPage, error) {
-	if query.Page < 1 {
-		query.Page = 1
-	}
-	if query.PageSize < 1 || query.PageSize > 100 {
-		query.PageSize = 20
-	}
+	query.Page, query.PageSize = normalizePage(query.Page, query.PageSize)
 	where := "1 = 1"
 	args := make([]any, 0, 3)
 	if query.PostID != "" {
@@ -113,12 +108,7 @@ func (r *SQLiteRepository) DeleteComment(id string) error {
 }
 
 func (r *SQLiteRepository) ListMedia(query MediaQuery) (MediaPage, error) {
-	if query.Page < 1 {
-		query.Page = 1
-	}
-	if query.PageSize < 1 || query.PageSize > 100 {
-		query.PageSize = 20
-	}
+	query.Page, query.PageSize = normalizePage(query.Page, query.PageSize)
 	var total int
 	if err := r.db.QueryRow(`SELECT COUNT(*) FROM media`).Scan(&total); err != nil {
 		return MediaPage{}, fmt.Errorf("count media: %w", err)

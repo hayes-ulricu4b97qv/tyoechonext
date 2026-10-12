@@ -152,9 +152,17 @@ func TestPublicReadingSurfaces(t *testing.T) {
 	}
 
 	assertArchive(t, public, server.URL, "America/Los_Angeles", published)
-	putJSON(t, owner, server.URL+"/api/v1/settings/site", map[string]string{
+	invalidZone := putJSON(t, owner, server.URL+"/api/v1/settings/site", map[string]string{
 		"name": "海岸", "url": "https://example.com", "adminMail": "owner@example.com",
 		"timezone": "Not/ARealZone", "description": "", "keywords": "笔记, Go",
+	}, http.StatusUnprocessableEntity)
+	if invalidZone["error"].(map[string]any)["code"] != "validation_error" {
+		t.Fatalf("invalid timezone = %#v", invalidZone)
+	}
+	assertArchive(t, public, server.URL, "America/Los_Angeles", published)
+	putJSON(t, owner, server.URL+"/api/v1/settings/site", map[string]string{
+		"name": "海岸", "url": "https://example.com", "adminMail": "owner@example.com",
+		"timezone": "UTC", "description": "", "keywords": "笔记, Go",
 	}, http.StatusOK)
 	assertArchive(t, public, server.URL, "UTC", published)
 

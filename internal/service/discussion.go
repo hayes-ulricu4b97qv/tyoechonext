@@ -19,7 +19,7 @@ type ReadingInput struct {
 
 func (s *Service) UpdateReading(input ReadingInput) (*store.Site, error) {
 	if input.PostsPerPage < 1 || input.PostsPerPage > 50 {
-		return nil, fmt.Errorf("%w: postsPerPage must be between 1 and 50", ErrValidation)
+		return nil, fmt.Errorf("%w: 每页文章数必须是 1 到 50", ErrValidation)
 	}
 	current, err := s.repo.Site()
 	if err != nil {
@@ -45,13 +45,13 @@ func commentDepthFrom(comment store.Comment, lookup func(string) (store.Comment,
 	current := comment
 	for current.ParentID != "" && depth <= maxCommentDepth {
 		if _, ok := seen[current.ParentID]; ok {
-			return 0, fmt.Errorf("%w: comment thread is invalid", ErrValidation)
+			return 0, fmt.Errorf("%w: 评论线程无效", ErrValidation)
 		}
 		seen[current.ParentID] = struct{}{}
 		parent, err := lookup(current.ParentID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return 0, fmt.Errorf("%w: comment thread is invalid", ErrValidation)
+				return 0, fmt.Errorf("%w: 评论线程无效", ErrValidation)
 			}
 			return 0, err
 		}
@@ -67,30 +67,30 @@ func buildComment(site store.Site, post store.Post, input CommentInput, parent *
 	authorURL := strings.TrimSpace(input.AuthorURL)
 	content := strings.TrimSpace(input.Content)
 	if runeLength(name) < 1 || runeLength(name) > 80 {
-		return store.Comment{}, fmt.Errorf("%w: authorName must be between 1 and 80 characters", ErrValidation)
+		return store.Comment{}, fmt.Errorf("%w: 称呼需要 1 到 80 个字符", ErrValidation)
 	}
 	if email != "" && !validEmail(email) {
-		return store.Comment{}, fmt.Errorf("%w: authorEmail must be a valid email address", ErrValidation)
+		return store.Comment{}, fmt.Errorf("%w: 邮箱格式不正确", ErrValidation)
 	}
 	if authorURL != "" && (runeLength(authorURL) > 200 || !validURL(authorURL)) {
-		return store.Comment{}, fmt.Errorf("%w: authorUrl must be an http or https URL up to 200 characters", ErrValidation)
+		return store.Comment{}, fmt.Errorf("%w: 网址必须是不超过 200 个字符的 http 或 https 地址", ErrValidation)
 	}
 	if runeLength(content) < 1 || runeLength(content) > 4000 {
-		return store.Comment{}, fmt.Errorf("%w: content must be between 1 and 4000 characters", ErrValidation)
+		return store.Comment{}, fmt.Errorf("%w: 评论需要 1 到 4000 个字符", ErrValidation)
 	}
 	if !site.CommentsEnabled || !post.AllowComment {
-		return store.Comment{}, fmt.Errorf("%w: comments are closed", ErrValidation)
+		return store.Comment{}, fmt.Errorf("%w: 评论已关闭", ErrValidation)
 	}
 	parentID := ""
 	if parent != nil {
 		if !site.CommentsThreaded {
-			return store.Comment{}, fmt.Errorf("%w: comment replies are disabled", ErrValidation)
+			return store.Comment{}, fmt.Errorf("%w: 已关闭回复", ErrValidation)
 		}
 		if parent.PostID != post.ID || parent.Status != "approved" {
-			return store.Comment{}, fmt.Errorf("%w: replies must target an approved comment on the same post", ErrValidation)
+			return store.Comment{}, fmt.Errorf("%w: 回复必须指向同一篇文章里已通过的评论", ErrValidation)
 		}
 		if parentDepth >= maxCommentDepth-1 {
-			return store.Comment{}, fmt.Errorf("%w: comment thread is too deep", ErrValidation)
+			return store.Comment{}, fmt.Errorf("%w: 回复层级过多", ErrValidation)
 		}
 		parentID = parent.ID
 	}

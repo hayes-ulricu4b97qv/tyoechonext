@@ -47,8 +47,12 @@ type Post struct {
 	AllowComment bool      `json:"allowComment"`
 	Categories   []Term    `json:"categories,omitempty"`
 	Tags         []Term    `json:"tags,omitempty"`
-	PublishedAt  time.Time `json:"publishedAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	PublishedAt        time.Time `json:"publishedAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+	PassphraseHash     string    `json:"-"`
+	SetPassphrase      bool      `json:"-"`
+	PassphrasePlain    string    `json:"-"`
+	RequestedPublishAt time.Time `json:"-"`
 }
 
 type Page struct {
@@ -257,7 +261,31 @@ type Repository interface {
 	DeleteUserSessions(string) error
 	DeleteOtherUserSessions(string, string) error
 	PurgeSessions(time.Time) error
+	SaveOutboundMail(string, string, string) error
+	ListOutboundMail() ([]OutboundMail, error)
+	SavePasswordReset(string, string, time.Time) error
+	ConsumePasswordReset(string, time.Time) (string, error)
+	ListPostRevisions(string) ([]PostRevision, error)
+	PostRevision(string) (PostRevision, error)
+	BackupDatabase(string) error
 	Close() error
+}
+
+type PostRevision struct {
+	ID        string    `json:"id"`
+	PostID    string    `json:"postId"`
+	Title     string    `json:"title"`
+	Excerpt   string    `json:"excerpt"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type OutboundMail struct {
+	ID        string    `json:"id"`
+	Recipient string    `json:"recipient"`
+	Subject   string    `json:"subject"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type SQLiteRepository struct {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 	"golang.org/x/crypto/bcrypt"
@@ -15,6 +16,9 @@ func (s *Service) Initialize(input SetupInput) (*store.Site, error) {
 	}
 	if strings.TrimSpace(input.Timezone) == "" {
 		input.Timezone = "Asia/Shanghai"
+	}
+	if _, err := time.LoadLocation(strings.TrimSpace(input.Timezone)); err != nil {
+		return nil, fmt.Errorf("%w: 时区必须是有效的 IANA 名称", ErrValidation)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.AdminPassword), bcrypt.DefaultCost)
 	if err != nil {
@@ -80,7 +84,7 @@ func (s *Service) UpdateAdminAccount(input AccountInput) (*store.Admin, error) {
 		email = admin.Email
 	}
 	if !validEmail(email) {
-		return nil, fmt.Errorf("%w: email must be a valid email address", ErrValidation)
+		return nil, fmt.Errorf("%w: 邮箱格式不正确", ErrValidation)
 	}
 
 	passwordHash := admin.PasswordHash
@@ -89,7 +93,7 @@ func (s *Service) UpdateAdminAccount(input AccountInput) (*store.Admin, error) {
 			return nil, ErrInvalidCredentials
 		}
 		if len(input.NewPassword) < 8 {
-			return nil, fmt.Errorf("%w: newPassword must be at least 8 characters", ErrValidation)
+			return nil, fmt.Errorf("%w: 新密码至少 8 个字符", ErrValidation)
 		}
 		passwordHashBytes, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
 		if err != nil {
@@ -141,17 +145,17 @@ func (s *Service) UpdateUser(username string, input UserInput) (*store.User, err
 		return nil, err
 	}
 	if user.Role == "owner" {
-		return nil, fmt.Errorf("%w: the owner account is managed through account settings", ErrValidation)
+		return nil, fmt.Errorf("%w: 所有者账户请在账户设置中修改", ErrValidation)
 	}
 	if input.Email != "" {
 		if !validEmail(input.Email) {
-			return nil, fmt.Errorf("%w: email must be a valid email address", ErrValidation)
+			return nil, fmt.Errorf("%w: 邮箱格式不正确", ErrValidation)
 		}
 		user.Email = strings.TrimSpace(input.Email)
 	}
 	if input.Role != "" {
 		if !validStaffRole(input.Role) {
-			return nil, fmt.Errorf("%w: role must be editor or moderator", ErrValidation)
+			return nil, fmt.Errorf("%w: 角色只能是编辑或审核员", ErrValidation)
 		}
 		user.Role = input.Role
 	}
@@ -160,7 +164,7 @@ func (s *Service) UpdateUser(username string, input UserInput) (*store.User, err
 	}
 	if input.Password != "" {
 		if len(input.Password) < 8 {
-			return nil, fmt.Errorf("%w: password must be at least 8 characters", ErrValidation)
+			return nil, fmt.Errorf("%w: 密码至少 8 个字符", ErrValidation)
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 		if err != nil {
@@ -186,7 +190,7 @@ func (s *Service) DeleteUser(username string) error {
 		return err
 	}
 	if user.Role == "owner" {
-		return fmt.Errorf("%w: the owner account cannot be deleted", ErrValidation)
+		return fmt.Errorf("%w: 不能删除所有者账户", ErrValidation)
 	}
 	if err := s.RevokeUserSessions(username); err != nil {
 		return err
@@ -200,7 +204,7 @@ func (s *Service) Site() (*store.Site, error) {
 
 func (s *Service) UpdateSite(site store.Site) (*store.Site, error) {
 	if strings.TrimSpace(site.Name) == "" || !validURL(site.URL) || !validEmail(site.AdminMail) {
-		return nil, fmt.Errorf("%w: a site name, valid URL and valid admin email are required", ErrValidation)
+		return nil, fmt.Errorf("%w: 需要站点名称、有效地址和有效的管理员邮箱", ErrValidation)
 	}
 	current, err := s.repo.Site()
 	if err != nil {
@@ -209,18 +213,21 @@ func (s *Service) UpdateSite(site store.Site) (*store.Site, error) {
 	description := strings.TrimSpace(site.Description)
 	keywords := strings.TrimSpace(site.Keywords)
 	if runeLength(description) > 2000 {
-		return nil, fmt.Errorf("%w: description must be at most 2000 characters", ErrValidation)
+		return nil, fmt.Errorf("%w: 描述最多 2000 个字符", ErrValidation)
 	}
 	if runeLength(keywords) > 500 {
-		return nil, fmt.Errorf("%w: keywords must be at most 500 characters", ErrValidation)
+		return nil, fmt.Errorf("%w: 关键词最多 500 个字符", ErrValidation)
 	}
 	current.Name = strings.TrimSpace(site.Name)
 	current.URL = strings.TrimRight(strings.TrimSpace(site.URL), "/")
 	current.AdminMail = strings.TrimSpace(site.AdminMail)
 	current.Description = description
 	current.Keywords = keywords
-	if strings.TrimSpace(site.Timezone) != "" {
-		current.Timezone = strings.TrimSpace(site.Timezone)
+	if timezone := strings.TrimSpace(site.Timezone); timezone != "" {
+		if _, err := time.LoadLocation(timezone); err != nil {
+			return nil, fmt.Errorf("%w: 时区必须是有效的 IANA 名称", ErrValidation)
+		}
+		current.Timezone = timezone
 	}
 	if err := s.repo.UpdateSite(*current); err != nil {
 		return nil, err

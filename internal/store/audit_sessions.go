@@ -36,12 +36,7 @@ func (r *SQLiteRepository) RecordAudit(event AuditEvent) error {
 }
 
 func (r *SQLiteRepository) ListAudit(query AuditQuery) (AuditPage, error) {
-	if query.Page < 1 {
-		query.Page = 1
-	}
-	if query.PageSize < 1 || query.PageSize > 100 {
-		query.PageSize = 20
-	}
+	query.Page, query.PageSize = normalizePage(query.Page, query.PageSize)
 	where := "1 = 1"
 	args := make([]any, 0, 2)
 	if strings.TrimSpace(query.Action) != "" {

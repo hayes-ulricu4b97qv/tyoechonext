@@ -10,6 +10,8 @@ export interface PostInput {
   allowComment?: boolean
   categories: string[]
   tags: string[]
+  publishAt?: string
+  passphrase?: string
 }
 
 export interface PageInput {
@@ -63,8 +65,10 @@ export function listPosts(query: PostListQuery = {}) {
   return api<PostPage>(`/api/v1/content/posts?${params.toString()}`)
 }
 
-export function getPost(slug: string) {
-  return api<Post>(`/api/v1/content/posts/${segment(slug)}`)
+export function getPost(slug: string, passphrase?: string) {
+  const headers = new Headers()
+  if (passphrase) headers.set('X-Post-Passphrase', passphrase)
+  return api<Post>(`/api/v1/content/posts/${segment(slug)}`, { headers })
 }
 
 export function savePost(id: string | null, input: PostInput) {
@@ -107,6 +111,10 @@ export function createTerm(input: TermInput) {
   return postJSON<Term>('/api/v1/content/terms', input)
 }
 
+export function updateTerm(id: string, input: TermInput) {
+  return putJSON<Term>(`/api/v1/content/terms/${segment(id)}`, input)
+}
+
 export function deleteTerm(id: string) {
   return api<void>(`/api/v1/content/terms/${segment(id)}`, { method: 'DELETE' })
 }
@@ -130,9 +138,30 @@ export function createComment(slug: string, input: CommentInput) {
 }
 
 export function listPendingComments(page = 1, pageSize = 100) {
+  return listModerationComments('pending', page, pageSize)
+}
+
+export function listModerationComments(status: 'pending' | 'approved' | 'spam', page = 1, pageSize = 100) {
   const params = pageQuery(page, pageSize)
-  params.set('status', 'pending')
+  params.set('status', status)
   return api<CommentPage>(`/api/v1/content/comments?${params.toString()}`)
+}
+
+export interface PostRevision {
+  id: string
+  postId: string
+  title: string
+  excerpt: string
+  content: string
+  createdAt: string
+}
+
+export function listRevisions(id: string) {
+  return api<{ items: PostRevision[] }>(`/api/v1/content/posts/${segment(id)}/revisions`)
+}
+
+export function restoreRevision(postId: string, revisionId: string) {
+  return postJSON<Post>(`/api/v1/content/posts/${segment(postId)}/revisions/${segment(revisionId)}/restore`, {})
 }
 
 export function moderateComment(id: string, status: 'approved' | 'spam' | 'pending') {
