@@ -3,9 +3,10 @@ package httpapi
 import (
 	"archive/zip"
 	"database/sql"
+	"errors"
 	"fmt"
-	"html"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,7 +15,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/untesheazulchunghu-beep/typecho/internal/config"
+	"github.com/untesheazulchunghu-beep/typecho/internal/service"
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
+)
+
+const (
+	maxForwardedForBytes = 4096
+	maxForwardedForHops  = 32
 )
 
 func (s *Server) loginFailureLimit() int {
@@ -33,25 +41,78 @@ func (s *Server) commentRateLimit() int {
 
 func (s *Server) sessionTTL() time.Duration {
 	minutes := s.settings.SessionTTLMin
-	if minutes < 1 {
+	if minutes < 1 || int64(minutes) > config.MaxSessionTTLMinutes {
 		minutes = 60 * 24
 	}
 	return time.Duration(minutes) * time.Minute
 }
 
 func (s *Server) allowComment(r *http.Request) bool {
-	return s.commentHits.Allow(clientHost(r), s.commentRateLimit(), time.Minute)
+	return s.commentHits.Allow(s.clientHost(r), s.commentRateLimit(), time.Minute)
 }
 
-func clientHost(r *http.Request) string {
+func (s *Server) clientHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || host == "" {
-		if r.RemoteAddr != "" {
-			return r.RemoteAddr
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(host)
+	if peer == nil {
+		if host != "" {
+			return host
 		}
 		return "unknown"
 	}
-	return host
+	if !s.isTrustedProxy(peer) {
+		return peer.String()
+	}
+	forwarded := strings.TrimSpace(strings.Join(r.Header.Values("X-Forwarded-For"), ","))
+	if forwarded == "" {
+		return peer.String()
+	}
+	if len(forwarded) > maxForwardedForBytes {
+		return peer.String()
+	}
+	chain := strings.Split(forwarded, ",")
+	if len(chain) > maxForwardedForHops {
+		return peer.String()
+	}
+	addresses := make([]net.IP, 0, len(chain))
+	for _, value := range chain {
+		ip := net.ParseIP(strings.TrimSpace(value))
+		if ip == nil {
+			return peer.String()
+		}
+		addresses = append(addresses, ip)
+	}
+	for index := len(addresses) - 1; index >= 0; index-- {
+		if !s.isTrustedProxy(addresses[index]) {
+			return addresses[index].String()
+		}
+	}
+	return addresses[0].String()
+}
+
+func parseTrustedProxyCIDRs(values []string, logger *slog.Logger) []*net.IPNet {
+	networks := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(value))
+		if err != nil {
+			logger.Warn("ignoring invalid trusted proxy CIDR", "cidr", value, "error", err)
+			continue
+		}
+		networks = append(networks, network)
+	}
+	return networks
+}
+
+func (s *Server) isTrustedProxy(ip net.IP) bool {
+	for _, network := range s.trustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 type forgotRequest struct {
@@ -65,19 +126,73 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	var request forgotRequest
 	if err := decodeJSON(w, r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
-	if err := s.app.RequestPasswordReset(request.Username); err != nil {
-		writeError(w, http.StatusInternalServerError, "mail_failed", "Unable to send mail")
+	limit := s.settings.PasswordResetLimit
+	if limit < 1 {
+		limit = 5
+	}
+	if !s.forgotHits.Allow(s.clientHost(r), limit, 15*time.Minute) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "请求过于频繁，请稍后再试")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "message": "如果账户存在，重置说明已发送到站点邮箱"})
+	if !s.app.MailAvailable() {
+		writeError(w, http.StatusServiceUnavailable, "mail_unavailable", "站点尚未配置安全邮件投递，暂时无法找回密码")
+		return
+	}
+	account, lookupErr := s.repo.User(strings.TrimSpace(request.Username))
+	accountKnown := lookupErr == nil && account.Active
+	accountLimit := s.settings.PasswordResetAccountLimit
+	if accountLimit < 1 {
+		accountLimit = 1
+	}
+	if accountKnown && !s.forgotAccounts.Allow(account.Username, accountLimit, 15*time.Minute) {
+		writePasswordResetAccepted(w)
+		return
+	}
+	requestErr := s.app.RequestPasswordReset(r.Context(), request.Username)
+	if requestErr != nil && accountKnown {
+		// Do not make a failed SMTP attempt block an immediate retry.
+		s.forgotAccounts.Reset(account.Username)
+	}
+	if errors.Is(requestErr, service.ErrMailUnavailable) {
+		writeError(w, http.StatusServiceUnavailable, "mail_unavailable", "站点尚未配置安全邮件投递，暂时无法找回密码")
+	} else {
+		if requestErr != nil {
+			s.logger.Warn("password reset request failed", "error", requestErr)
+		}
+		writePasswordResetAccepted(w)
+	}
+}
+
+func writePasswordResetAccepted(w http.ResponseWriter) {
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "message": "如果账户存在，重置口令已发送到该账户的邮箱"})
 }
 
 type resetRequest struct {
 	Token    string `json:"token"`
 	Password string `json:"password"`
+}
+
+func (s *Server) listOutboundMail(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOwner(w, r) {
+		return
+	}
+	page, pageSize, err := pagination(r)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	mailPage, err := s.app.ListOutboundMail(page, pageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read mail")
+		return
+	}
+	if mailPage.Items == nil {
+		mailPage.Items = []store.OutboundMail{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": mailPage.Items, "total": mailPage.Total, "page": mailPage.Page, "pageSize": mailPage.PageSize})
 }
 
 func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +202,7 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	var request resetRequest
 	if err := decodeJSON(w, r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	if err := s.app.ResetPassword(request.Token, request.Password); err != nil {
@@ -233,22 +348,11 @@ func buildBackup(archivePath, dbPath, mediaRoot string) (err error) {
 }
 
 func addZipFile(archive *zip.Writer, name, path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("backup file is not a regular file: %s", name)
-	}
-	file, err := os.Open(path)
+	file, info, err := openRegularFile(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	info, err = file.Stat()
-	if err != nil {
-		return err
-	}
 	header, err := zip.FileInfoHeader(info)
 	if err != nil {
 		return err
@@ -263,72 +367,27 @@ func addZipFile(archive *zip.Writer, name, path string) error {
 	return err
 }
 
-func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath string) {
-	raw, err := os.ReadFile(filepath.Join(s.webDir, "index.html"))
+func openRegularFile(path string) (*os.File, os.FileInfo, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
-		http.NotFound(w, r)
-		return
+		return nil, nil, err
 	}
-	siteName := "Typecho Next"
-	description := ""
-	var site *store.Site
-	if s.repo.Initialized() {
-		if loaded, err := s.app.Site(); err == nil && loaded != nil && strings.TrimSpace(loaded.Name) != "" {
-			site = loaded
-			siteName = loaded.Name
-			description = strings.TrimSpace(loaded.Description)
-		}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("file is not a regular file: %s", path)
 	}
-	title := siteName
-	body := "<h1>" + html.EscapeString(siteName) + "</h1>"
-	if description != "" {
-		body += "<p>" + html.EscapeString(description) + "</p>"
+	pathInfo := info
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
 	}
-	if slug, ok := routeSlug(cleanPath, "/user/"); ok {
-		if post, err := s.app.GetPost(slug, false); err == nil {
-			title = post.Title + " - " + siteName
-			body = "<article><h1>" + html.EscapeString(post.Title) + "</h1>"
-			if post.PassphraseHash == "" {
-				body += "<div>" + html.EscapeString(post.Content) + "</div>"
-			}
-			body += "</article>"
-		}
+	info, err = file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
 	}
-	if slug, ok := routeSlug(cleanPath, "/page/"); ok {
-		if page, err := s.app.GetPage(slug, false); err == nil {
-			title = page.Title + " - " + siteName
-			body = "<article><h1>" + html.EscapeString(page.Title) + "</h1><div>" + html.EscapeString(page.Content) + "</div></article>"
-		}
+	if !info.Mode().IsRegular() || !os.SameFile(pathInfo, info) {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("file changed while opening: %s", path)
 	}
-	if site == nil && (cleanPath == "/admin" || strings.HasPrefix(cleanPath, "/setting")) {
-		body = "<h1>" + html.EscapeString(siteName) + "</h1>"
-	}
-	htmlText := replaceHTMLTitle(string(raw), title)
-	const marker = `<div id="app"></div>`
-	if strings.Contains(htmlText, marker) {
-		htmlText = strings.Replace(htmlText, marker, `<div id="app">`+body+`</div>`, 1)
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, htmlText)
-}
-
-func replaceHTMLTitle(htmlText, title string) string {
-	start := strings.Index(htmlText, "<title>")
-	end := strings.Index(htmlText, "</title>")
-	if start < 0 || end < start {
-		return htmlText
-	}
-	return htmlText[:start] + "<title>" + html.EscapeString(title) + htmlText[end:]
-}
-
-func routeSlug(cleanPath, prefix string) (string, bool) {
-	if !strings.HasPrefix(cleanPath, prefix) {
-		return "", false
-	}
-	rest := strings.TrimPrefix(cleanPath, prefix)
-	if rest == "" || strings.Contains(rest, "/") {
-		return "", false
-	}
-	return rest, true
+	return file, info, nil
 }

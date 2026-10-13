@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSearchUsesTokenIndexInsteadOfContentLike(t *testing.T) {
@@ -52,7 +53,7 @@ func TestSearchUsesTokenIndexInsteadOfContentLike(t *testing.T) {
 		t.Fatalf("underscore search = %#v", underscores.Items)
 	}
 
-	rows, err := repo.db.Query("EXPLAIN QUERY PLAN "+searchTokenLookupSQL, "post", "紫")
+	rows, err := repo.db.Query("EXPLAIN QUERY PLAN "+searchTokenCandidatesSQL(3), "post", "紫", "紫薇", "薇", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,5 +74,109 @@ func TestSearchUsesTokenIndexInsteadOfContentLike(t *testing.T) {
 	text := strings.ToLower(plan.String())
 	if text == "" || !strings.Contains(text, "search_tokens") || strings.Contains(text, "like") || strings.Contains(text, "content") {
 		t.Fatalf("query plan = %q", plan.String())
+	}
+}
+
+func TestSearchPostsSkipsContentUnlessRequested(t *testing.T) {
+	repo, err := NewSQLiteRepository(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	body := strings.Repeat("长正文", 5000)
+	created, err := repo.SavePost(Post{Title: "列表摘要", Slug: "summary", Excerpt: "可公开的摘要", Content: body, Status: "published"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := repo.SearchPosts(PostQuery{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Items) != 1 || listed.Items[0].ID != created.ID || listed.Items[0].Content != "" {
+		t.Fatalf("summary query returned body data: %#v", listed.Items)
+	}
+
+	feed, err := repo.SearchPosts(PostQuery{IncludeContent: true, Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Items) != 1 || feed.Items[0].Content != body {
+		t.Fatalf("explicit content query returned %d runes", len(feed.Items[0].Content))
+	}
+}
+
+func TestPostListBatchPopulatesTermsAndVisibleCounts(t *testing.T) {
+	repo, err := NewSQLiteRepository(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	now := time.Now().UTC()
+	posts := []Post{
+		{Title: "Public", Slug: "batch-public", Content: "body", Status: "published", PublishedAt: now.Add(-time.Hour)},
+		{Title: "Scheduled", Slug: "batch-scheduled", Content: "body", Status: "published", PublishedAt: now.Add(time.Hour)},
+		{Title: "Draft", Slug: "batch-draft", Content: "body", Status: "draft"},
+	}
+	for index := range posts {
+		posts[index].Categories = []Term{{Name: "Batch category", Kind: "category"}}
+		posts[index].Tags = []Term{{Name: "Batch tag", Kind: "tag"}}
+		if _, err := repo.SavePost(posts[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	listed, err := repo.SearchPosts(PostQuery{IncludeDrafts: true, Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Items) != len(posts) {
+		t.Fatalf("listed posts = %d, want %d", len(listed.Items), len(posts))
+	}
+	for _, post := range listed.Items {
+		if len(post.Categories) != 1 || post.Categories[0].Name != "Batch category" || len(post.Tags) != 1 || post.Tags[0].Name != "Batch tag" {
+			t.Fatalf("terms for %q = categories %#v, tags %#v", post.Slug, post.Categories, post.Tags)
+		}
+		if post.Categories[0].PostCount != 1 || post.Tags[0].PostCount != 1 {
+			t.Fatalf("visible counts for %q = category %d, tag %d, want 1 each", post.Slug, post.Categories[0].PostCount, post.Tags[0].PostCount)
+		}
+	}
+
+	all, err := repo.Posts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(posts) {
+		t.Fatalf("all posts = %d, want %d", len(all), len(posts))
+	}
+	for _, post := range all {
+		if len(post.Categories) != 1 || len(post.Tags) != 1 || post.Categories[0].PostCount != 1 || post.Tags[0].PostCount != 1 {
+			t.Fatalf("batched post terms for %q = %#v / %#v", post.Slug, post.Categories, post.Tags)
+		}
+	}
+}
+
+func TestRevisionSnapshotsDetectChangedEmptyCustomFieldKeys(t *testing.T) {
+	repo, err := NewSQLiteRepository(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	post, err := repo.SavePost(Post{Title: "Fields", Slug: "empty-field-key", Content: "Body", CustomFields: map[string]string{"old": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post.CustomFields = map[string]string{"new": ""}
+	if _, err := repo.SavePost(post); err != nil {
+		t.Fatal(err)
+	}
+	revisions, err := repo.ListPostRevisions(post.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revisions) != 1 || len(revisions[0].CustomFields) != 1 || revisions[0].CustomFields["old"] != "" {
+		t.Fatalf("changed empty-valued field keys were not snapshotted: %#v", revisions)
 	}
 }

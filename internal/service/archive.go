@@ -8,16 +8,25 @@ import (
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 )
 
-func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order string, includeDrafts bool, page, pageSize int) (store.PostPage, error) {
+func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order string, includeDrafts bool, status string, page, pageSize int) (store.PostPage, error) {
+	search, err := normalizeSearchQuery(search)
+	if err != nil {
+		return store.PostPage{}, err
+	}
 	categorySlug = strings.TrimSpace(categorySlug)
 	tagSlug = strings.TrimSpace(tagSlug)
 	order = strings.TrimSpace(order)
+	status = strings.TrimSpace(status)
 	if order != "" && order != "updated" && order != "published" {
 		return store.PostPage{}, fmt.Errorf("%w: 排序只能是 updated 或 published", ErrValidation)
+	}
+	if status != "" && status != "draft" && status != "published" {
+		return store.PostPage{}, fmt.Errorf("%w: 文章状态只能是 draft 或 published", ErrValidation)
 	}
 	query := store.PostQuery{
 		Search:        search,
 		IncludeDrafts: includeDrafts,
+		Status:        status,
 		CategorySlug:  categorySlug,
 		TagSlug:       tagSlug,
 		Order:         order,
@@ -26,12 +35,14 @@ func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order s
 	}
 	month = strings.TrimSpace(month)
 	if month != "" {
-		ids, err := s.publishedIDsInMonth(month)
+		location, err := s.siteLocation()
 		if err != nil {
 			return store.PostPage{}, err
 		}
-		query.RestrictIDs = true
-		query.IDs = ids
+		query.PublishedFrom, query.PublishedBefore, err = monthWindow(month, location)
+		if err != nil {
+			return store.PostPage{}, err
+		}
 	}
 	return s.repo.SearchPosts(query)
 }
@@ -73,52 +84,7 @@ func (s *Service) PublishedNeighbors(post store.Post) (*store.Post, *store.Post,
 	if post.Status != "published" || post.PublishedAt.IsZero() {
 		return nil, nil, nil
 	}
-	posts, err := s.repo.ListPublishedMeta()
-	if err != nil {
-		return nil, nil, err
-	}
-	var previous, next *store.Post
-	for index := range posts {
-		candidate := posts[index]
-		if candidate.ID == post.ID {
-			continue
-		}
-		switch comparePublished(candidate, post) {
-		case -1:
-			if previous == nil || comparePublished(candidate, *previous) > 0 {
-				copy := candidate
-				previous = &copy
-			}
-		case 1:
-			if next == nil || comparePublished(candidate, *next) < 0 {
-				copy := candidate
-				next = &copy
-			}
-		}
-	}
-	return previous, next, nil
-}
-
-func (s *Service) publishedIDsInMonth(month string) ([]string, error) {
-	loc, err := s.siteLocation()
-	if err != nil {
-		return nil, err
-	}
-	start, end, err := monthWindow(month, loc)
-	if err != nil {
-		return nil, err
-	}
-	posts, err := s.repo.ListPublishedMeta()
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0)
-	for _, post := range posts {
-		if !post.PublishedAt.Before(start) && post.PublishedAt.Before(end) {
-			ids = append(ids, post.ID)
-		}
-	}
-	return ids, nil
+	return s.repo.PublishedNeighbors(post)
 }
 
 func (s *Service) siteLocation() (*time.Location, error) {
@@ -150,23 +116,6 @@ func monthWindow(month string, loc *time.Location) (time.Time, time.Time, error)
 		return time.Time{}, time.Time{}, fmt.Errorf("%w: 月份格式必须是 YYYY-MM", ErrValidation)
 	}
 	return parsed, parsed.AddDate(0, 1, 0), nil
-}
-
-func comparePublished(left, right store.Post) int {
-	if left.PublishedAt.Before(right.PublishedAt) {
-		return -1
-	}
-	if left.PublishedAt.After(right.PublishedAt) {
-		return 1
-	}
-	switch {
-	case left.ID < right.ID:
-		return -1
-	case left.ID > right.ID:
-		return 1
-	default:
-		return 0
-	}
 }
 
 func sortMonths(items []store.MonthCount) {

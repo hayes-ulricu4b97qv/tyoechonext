@@ -6,6 +6,7 @@ export interface PostInput {
   slug: string
   excerpt: string
   content: string
+  customFields?: Record<string, string>
   status: 'draft' | 'published'
   allowComment?: boolean
   categories: string[]
@@ -50,6 +51,7 @@ export interface PostListQuery {
   month?: string
   order?: 'updated' | 'published'
   includeDraft?: boolean
+  status?: 'draft' | 'published'
   page?: number
   pageSize?: number
 }
@@ -62,6 +64,7 @@ export function listPosts(query: PostListQuery = {}) {
   if (query.month?.trim()) params.set('month', query.month.trim())
   if (query.order) params.set('order', query.order)
   if (query.includeDraft) params.set('includeDraft', 'true')
+  if (query.status) params.set('status', query.status)
   return api<PostPage>(`/api/v1/content/posts?${params.toString()}`)
 }
 
@@ -153,6 +156,7 @@ export interface PostRevision {
   title: string
   excerpt: string
   content: string
+  customFields?: Record<string, string>
   createdAt: string
 }
 

@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ApiError } from '../api'
 import { forgotPassword, getCurrentUser, login as loginRequest, logout as logoutRequest, resetPassword } from '../api/auth'
@@ -27,7 +25,9 @@ import {
   type PostRevision,
 } from '../api/content'
 import { setDocumentMeta } from '../meta'
+import { renderMarkdown } from '../markdown'
 import { getDashboardStats } from '../api/settings'
+import AdminNotifications from './AdminNotifications.vue'
 import type { Comment, Media, Page, Post, Stats, Status, Term, User } from '../types'
 
 const props = defineProps<{ status: Status }>()
@@ -58,13 +58,16 @@ const loginError = ref('')
 const loginLoading = ref(false)
 const showEditor = ref(false)
 const editor = reactive({ title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft' as 'draft' | 'published', publishAt: '', passphrase: '' })
+const customFieldRows = ref<Array<{ key: string; value: string }>>([])
 const revisions = ref<PostRevision[]>([])
-const previewHTML = computed(() => DOMPurify.sanitize(String(marked.parse(editor.content || '', { async: false }))))
+const postContentInput = ref<HTMLTextAreaElement | null>(null)
+const previewHTML = computed(() => renderMarkdown(editor.content || ''))
 const editorError = ref('')
 const editingId = ref<string | null>(null)
 const showPageEditor = ref(false)
 const pageEditor = reactive({ title: '', slug: '', excerpt: '', content: '', status: 'draft' as 'draft' | 'published' })
-const pagePreviewHTML = computed(() => DOMPurify.sanitize(String(marked.parse(pageEditor.content || '', { async: false }))))
+const pageContentInput = ref<HTMLTextAreaElement | null>(null)
+const pagePreviewHTML = computed(() => renderMarkdown(pageEditor.content || ''))
 const pageEditorError = ref('')
 const editingPageId = ref<string | null>(null)
 const commentError = ref('')
@@ -89,7 +92,7 @@ const resetPasswordValue = ref('')
 const forgotMessage = ref('')
 const canEditContent = computed(() => user.value?.role === 'owner' || user.value?.role === 'editor')
 const canModerateComments = computed(() => user.value?.role === 'owner' || user.value?.role === 'moderator')
-const visiblePosts = computed(() => posts.value.filter((post) => postListFilter.value === 'all' || post.status === postListFilter.value))
+const visiblePosts = computed(() => posts.value)
 
 async function loadDashboard() {
   loading.value = true
@@ -102,7 +105,7 @@ async function loadDashboard() {
     const blank = <T,>() => ({ items: [] as T[], total: 0, page: 1, pageSize: adminPageSize })
     const [summary, postResponse, pageResponse, commentResponse, mediaResponse, termResponse] = await Promise.all([
       getDashboardStats(),
-      listPosts({ includeDraft: true, page: postPage.value, pageSize: adminPageSize }),
+      listPosts({ includeDraft: true, status: postListFilter.value === 'all' ? undefined : postListFilter.value, page: postPage.value, pageSize: adminPageSize }),
       canEdit ? listPages(true, pagePage.value, adminPageSize) : Promise.resolve(blank<Page>()),
       canModerate ? listModerationComments(commentStatus.value, commentPage.value, adminPageSize) : Promise.resolve(blank<Comment>()),
       canEdit ? listMedia(mediaPage.value, adminPageSize) : Promise.resolve(blank<Media>()),
@@ -132,7 +135,7 @@ async function loadDashboard() {
 function bindSections() {
   sectionObserver?.disconnect()
   return nextTick(() => {
-    const nodes = ['overview', 'posts', 'pages', 'comments', 'media', 'taxonomy']
+    const nodes = ['overview', 'posts', 'pages', 'comments', 'media', 'taxonomy', 'mail']
       .map((id) => document.getElementById(id))
       .filter((node): node is HTMLElement => node instanceof HTMLElement)
     if (nodes.length === 0) return
@@ -170,6 +173,13 @@ function pageCount(total: number) {
 async function changePostPage(next: number) {
   if (next < 1 || next > pageCount(postTotal.value)) return
   postPage.value = next
+  await loadDashboard()
+}
+
+async function switchPostFilter(filter: 'all' | 'published' | 'draft') {
+  if (postListFilter.value === filter) return
+  postListFilter.value = filter
+  postPage.value = 1
   await loadDashboard()
 }
 
@@ -220,6 +230,7 @@ async function startEdit(post: Post) {
       publishAt: '',
       passphrase: '',
     })
+    customFieldRows.value = Object.entries(full.customFields ?? {}).map(([key, value]) => ({ key, value }))
     revisions.value = (await listRevisions(full.id)).items
     showEditor.value = true
     showPreview.value = false
@@ -237,6 +248,8 @@ async function toggleEditor() {
     cancelEditor()
     return
   }
+  editingId.value = null
+  customFieldRows.value = []
   showEditor.value = true
   showPreview.value = false
   await nextTick()
@@ -249,18 +262,48 @@ function cancelEditor() {
   showEditor.value = false
   showPreview.value = false
   revisions.value = []
+  customFieldRows.value = []
   Object.assign(editor, { title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft', publishAt: '', passphrase: '' })
   editorError.value = ''
 }
 
+function addCustomField() {
+  if (customFieldRows.value.length < 50) customFieldRows.value.push({ key: '', value: '' })
+}
+
+function removeCustomField(index: number) {
+  customFieldRows.value.splice(index, 1)
+}
+
+function collectCustomFields() {
+  const fields: Record<string, string> = {}
+  for (const row of customFieldRows.value) {
+    const key = row.key.trim()
+    if (!key && row.value === '') continue
+    if (!key) {
+      editorError.value = '请填写自定义字段名称'
+      return null
+    }
+    if (Object.prototype.hasOwnProperty.call(fields, key)) {
+      editorError.value = '自定义字段名称不能重复'
+      return null
+    }
+    fields[key] = row.value
+  }
+  return fields
+}
+
 async function publish() {
   editorError.value = ''
+  const customFields = collectCustomFields()
+  if (!customFields) return
   try {
     const payload = {
       title: editor.title,
       slug: editor.slug,
       excerpt: editor.excerpt,
       content: editor.content,
+      customFields,
       status: editor.status,
       categories: splitTerms(editor.categories),
       tags: splitTerms(editor.tags),
@@ -410,14 +453,40 @@ async function removeMedia(asset: Media) {
   }
 }
 
-function insertMedia(asset: Media) {
-  const markdown = `![](${asset.url})`
-  editor.content = editor.content ? `${editor.content}\n${markdown}\n` : `${markdown}\n`
-  showEditor.value = true
-  showPreview.value = false
+function insertBlockAtSelection(content: string, start: number, end: number, block: string) {
+  const before = content.slice(0, start)
+  const after = content.slice(end)
+  const prefix = before.length === 0 ? '' : before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n'
+  const suffix = after.length === 0 ? '' : after.startsWith('\n\n') ? '' : after.startsWith('\n') ? '\n' : '\n\n'
+  return {
+    content: before + prefix + block + suffix + after,
+    selectionStart: before.length + prefix.length + 2,
+    selectionEnd: before.length + prefix.length + 6,
+  }
+}
+
+function insertMedia(asset: Media, target: 'post' | 'page' = 'post') {
+  const input = target === 'post' ? postContentInput.value : pageContentInput.value
+  const current = target === 'post' ? editor.content : pageEditor.content
+  const start = input?.selectionStart ?? current.length
+  const end = input?.selectionEnd ?? start
+  const insertion = insertBlockAtSelection(current, start, end, '![图片说明](' + asset.url + ')')
+
+  if (target === 'post') {
+    editor.content = insertion.content
+    showEditor.value = true
+    showPreview.value = false
+  } else {
+    pageEditor.content = insertion.content
+    showPageEditor.value = true
+    showPagePreview.value = false
+  }
   void nextTick(() => {
-    document.getElementById('post-editor')?.scrollIntoView({ block: 'start', behavior: 'auto' })
-    document.querySelector<HTMLTextAreaElement>('#post-editor textarea')?.focus({ preventScroll: true })
+    const form = document.getElementById(target === 'post' ? 'post-editor' : 'page-editor')
+    const textarea = target === 'post' ? postContentInput.value : pageContentInput.value
+    form?.scrollIntoView({ block: 'start', behavior: 'auto' })
+    textarea?.focus({ preventScroll: true })
+    textarea?.setSelectionRange(insertion.selectionStart, insertion.selectionEnd)
   })
 }
 
@@ -429,6 +498,7 @@ async function restore(revision: PostRevision) {
     editor.title = restored.title
     editor.excerpt = restored.excerpt
     editor.content = restored.content ?? ''
+    customFieldRows.value = Object.entries(restored.customFields ?? {}).map(([key, value]) => ({ key, value }))
     revisions.value = (await listRevisions(editingId.value)).items
   } catch (reason) {
     editorError.value = reason instanceof ApiError ? reason.message : '恢复版本失败'
@@ -527,6 +597,7 @@ onUnmounted(() => sectionObserver?.disconnect())
         <a v-if="canModerateComments" href="#comments" :class="{ active: activeAnchor === 'comments' }">评论</a>
         <a v-if="canEditContent" href="#media" :class="{ active: activeAnchor === 'media' }">媒体</a>
         <a v-if="canEditContent" href="#taxonomy" :class="{ active: activeAnchor === 'taxonomy' }">分类</a>
+        <a v-if="user.role === 'owner'" href="#mail" :class="{ active: activeAnchor === 'mail' }">通知</a>
         <a v-if="user.role === 'owner'" href="/setting">设置</a>
       </nav>
       <div class="top-actions">
@@ -548,7 +619,7 @@ onUnmounted(() => sectionObserver?.disconnect())
         </form>
         <button class="text-button" type="button" @click="showReset = !showReset">忘记密码</button>
         <form v-if="showReset" class="login-reset" @submit.prevent="applyReset">
-          <p>重置说明会发到站点邮箱。把邮件中的重置口令填在下面。</p>
+          <p>重置口令会发送到该账户登记的邮箱，并在 30 分钟后失效。站点需要配置 SMTP 邮件投递。</p>
           <button class="text-button" type="button" :disabled="!loginForm.username" @click="sendReset">发送重置邮件</button>
           <label>重置口令<input v-model="resetToken" required autocomplete="off" /></label>
           <label>新密码<input v-model="resetPasswordValue" required type="password" minlength="8" autocomplete="new-password" /></label>
@@ -571,13 +642,15 @@ onUnmounted(() => sectionObserver?.disconnect())
           <div class="stat-card stat-blue"><span>待审核评论</span><strong>{{ stats.pendingComments }}</strong><small>需要处理</small></div>
         </div>
 
+        <AdminNotifications v-if="user?.role === 'owner'" />
+
         <section class="admin-section" id="posts">
           <div class="section-heading"><div><p class="eyebrow">文章</p><h2>写作与稿件</h2></div><span class="section-count">{{ postTotal }} 篇</span><button v-if="canEditContent" class="button button-primary" type="button" @click="toggleEditor">{{ showEditor ? '关闭编辑器' : '+ 写文章' }}</button></div>
           <form v-if="showEditor && canEditContent" id="post-editor" class="editor-card editor-split" @submit.prevent="publish">
             <div class="editor-write">
               <input v-model="editor.title" class="editor-title" required placeholder="文章标题" />
               <label class="editor-slug">固定链接<input v-model="editor.slug" placeholder="留空则保留现有地址或按标题生成" /></label>
-              <textarea v-model="editor.content" rows="12" required placeholder="开始写作，支持 Markdown…"></textarea>
+              <textarea ref="postContentInput" v-model="editor.content" rows="12" required placeholder="开始写作，支持 Markdown…" aria-label="文章 Markdown 正文"></textarea>
               <div class="editor-preview-bar"><button class="text-button" type="button" @click="showPreview = !showPreview">{{ showPreview ? '收起预览' : '看预览' }}</button></div>
               <div v-if="showPreview" class="article-body article-rich editor-preview" v-html="previewHTML"></div>
             </div>
@@ -587,6 +660,15 @@ onUnmounted(() => sectionObserver?.disconnect())
               <label>标签<input v-model="editor.tags" placeholder="Go, Vue, 重构" /></label>
               <label>定时发布<input v-model="editor.publishAt" type="datetime-local" /></label>
               <label>阅读口令<input v-model="editor.passphrase" type="password" autocomplete="new-password" placeholder="留空则不修改；填写后读者需口令才能看正文" /></label>
+              <section class="custom-field-editor" aria-label="自定义字段">
+                <div class="custom-field-heading"><strong>自定义字段</strong><button class="text-button" type="button" :disabled="customFieldRows.length >= 50" @click="addCustomField">添加字段</button></div>
+                <div v-for="(field, index) in customFieldRows" :key="index" class="custom-field-row">
+                  <label>名称<input v-model="field.key" maxlength="80" placeholder="例如 subtitle" /></label>
+                  <label>值<textarea v-model="field.value" maxlength="2000" rows="2" placeholder="字段内容"></textarea></label>
+                  <button class="text-button danger" type="button" :aria-label="`删除自定义字段 ${index + 1}`" @click="removeCustomField(index)">删除</button>
+                </div>
+                <small>字段名称最多 80 个字符，字段值最多 2,000 个字符；每篇文章最多 50 项。</small>
+              </section>
               <div v-if="revisions.length" class="taxonomy-list">
                 <div v-for="revision in revisions" :key="revision.id" class="taxonomy-row">
                   <div><strong>{{ revision.title }}</strong><small>{{ new Date(revision.createdAt).toLocaleString('zh-CN') }}</small></div>
@@ -600,9 +682,9 @@ onUnmounted(() => sectionObserver?.disconnect())
           <div v-else-if="posts.length === 0" class="empty-state"><strong>开始你的第一篇文章</strong><span>文章会保存在新的内容服务中。</span></div>
           <template v-else>
             <div class="term-filter-bar" aria-label="按状态筛选文章">
-              <button class="term-filter" type="button" :class="{ active: postListFilter === 'all' }" @click="postListFilter = 'all'">全部</button>
-              <button class="term-filter" type="button" :class="{ active: postListFilter === 'published' }" @click="postListFilter = 'published'">已发布</button>
-              <button class="term-filter" type="button" :class="{ active: postListFilter === 'draft' }" @click="postListFilter = 'draft'">草稿</button>
+              <button class="term-filter" type="button" :class="{ active: postListFilter === 'all' }" @click="switchPostFilter('all')">全部</button>
+              <button class="term-filter" type="button" :class="{ active: postListFilter === 'published' }" @click="switchPostFilter('published')">已发布</button>
+              <button class="term-filter" type="button" :class="{ active: postListFilter === 'draft' }" @click="switchPostFilter('draft')">草稿</button>
             </div>
             <div v-if="visiblePosts.length === 0" class="empty-state">这一页没有符合的文章</div>
             <div v-else class="admin-posts">
@@ -618,7 +700,7 @@ onUnmounted(() => sectionObserver?.disconnect())
             <div class="editor-write">
               <input v-model="pageEditor.title" class="editor-title" required placeholder="页面标题" />
               <label class="editor-slug">固定链接<input v-model="pageEditor.slug" placeholder="留空则按标题生成" /></label>
-              <textarea v-model="pageEditor.content" rows="12" required placeholder="页面内容，支持 Markdown…"></textarea>
+              <textarea ref="pageContentInput" v-model="pageEditor.content" rows="12" required placeholder="页面内容，支持 Markdown…" aria-label="页面 Markdown 正文"></textarea>
               <div class="editor-preview-bar"><button class="text-button" type="button" @click="showPagePreview = !showPagePreview">{{ showPagePreview ? '收起预览' : '看预览' }}</button></div>
               <div v-if="showPagePreview" class="article-body article-rich editor-preview" v-html="pagePreviewHTML"></div>
             </div>
@@ -665,7 +747,7 @@ onUnmounted(() => sectionObserver?.disconnect())
             <article v-for="asset in media" :key="asset.id" class="media-card">
               <a :href="asset.url" target="_blank" rel="noreferrer"><img :src="asset.url" :alt="asset.filename" loading="lazy" /></a>
               <div class="media-card-info"><strong :title="asset.filename">{{ asset.filename }}</strong><span>{{ Math.ceil(asset.size / 1024) }} KB</span></div>
-              <div class="row-actions"><button class="text-button" type="button" @click="insertMedia(asset)">插入文章</button><button class="text-button danger" :disabled="mediaActionId === asset.id" @click="removeMedia(asset)">删除</button></div>
+              <div class="row-actions"><button class="text-button" type="button" @click="insertMedia(asset, 'post')">插入文章</button><button v-if="showPageEditor" class="text-button" type="button" @click="insertMedia(asset, 'page')">插入页面</button><button class="text-button danger" :disabled="mediaActionId === asset.id" @click="removeMedia(asset)">删除</button></div>
             </article>
           </div>
           <div v-if="mediaTotal > adminPageSize" class="pagination"><button class="text-button" type="button" :disabled="mediaPage === 1" @click="changeMediaPage(mediaPage - 1)">上一页</button><span>{{ mediaPage }} / {{ pageCount(mediaTotal) }} · 共 {{ mediaTotal }} 个</span><button class="text-button" type="button" :disabled="mediaPage >= pageCount(mediaTotal)" @click="changeMediaPage(mediaPage + 1)">下一页</button></div>

@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ApiError } from '../api'
 import { createComment, getPost, listPostComments } from '../api/content'
+import { renderMarkdown } from '../markdown'
 import { setDocumentMeta } from '../meta'
 import type { Comment, Post, Status, Term } from '../types'
 
@@ -29,10 +28,7 @@ const progress = ref(0)
 const commentsOpen = computed(() => selectedPost.value?.allowComment !== false && props.status.reading?.commentsEnabled !== false)
 const repliesOpen = computed(() => commentsOpen.value && props.status.reading?.commentsThreaded !== false)
 const threadedComments = computed(() => threadComments(comments.value))
-const renderedContent = computed(() => {
-  const html = marked.parse(selectedPost.value?.content ?? '', { async: false })
-  return DOMPurify.sanitize(String(html))
-})
+const renderedContent = computed(() => renderMarkdown(selectedPost.value?.content ?? ''))
 const readingLabel = computed(() => {
   const text = selectedPost.value?.content?.replace(/\s+/g, '') ?? ''
   if (!text) return ''
@@ -195,6 +191,13 @@ onUnmounted(() => window.removeEventListener('scroll', updateProgress))
       <button class="button button-dark" :disabled="unlocking">{{ unlocking ? '验证中…' : '查看正文' }}</button>
     </form>
     <div v-else class="article-body article-rich" v-html="renderedContent"></div>
+    <section v-if="selectedPost.content !== undefined && Object.keys(selectedPost.customFields ?? {}).length" class="post-custom-fields" aria-label="文章自定义字段">
+      <dl>
+        <div v-for="field in Object.entries(selectedPost.customFields ?? {})" :key="field[0]">
+          <dt>{{ field[0] }}</dt><dd>{{ field[1] }}</dd>
+        </div>
+      </dl>
+    </section>
     <nav v-if="selectedPost.previous || selectedPost.next" class="post-neighbors" aria-label="相邻文章">
       <a v-if="selectedPost.previous" :href="`/user/${selectedPost.previous.slug}`"><small>上一篇</small><strong>{{ selectedPost.previous.title }}</strong></a>
       <span v-else></span>

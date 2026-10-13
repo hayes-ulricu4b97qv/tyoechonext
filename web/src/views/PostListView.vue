@@ -9,6 +9,12 @@ const pageSize = computed(() => (props.pageSize >= 1 && props.pageSize <= 50 ? p
 
 const posts = ref<Post[]>([])
 const terms = ref<Term[]>([])
+const termsPage = ref(0)
+const termsTotal = ref(0)
+const termsLoading = ref(false)
+const termsError = ref(false)
+const termsRetryPage = ref(1)
+const termsPerBatch = 24
 const loading = ref(true)
 const error = ref('')
 const search = ref('')
@@ -26,23 +32,27 @@ function syncFiltersFromURL() {
   monthFilter.value = filters.get('month') ?? ''
   submittedSearch.value = filters.get('q') ?? ''
   search.value = submittedSearch.value
+  const requestedPage = filters.get('page') ?? ''
+  page.value = /^[1-9]\d*$/.test(requestedPage) && Number.isSafeInteger(Number(requestedPage)) ? Number(requestedPage) : 1
 }
 
-function updateFilterURL() {
+function updateFilterURL(replace = false) {
   const query = new URLSearchParams()
   if (categoryFilter.value) query.set('category', categoryFilter.value)
   if (tagFilter.value) query.set('tag', tagFilter.value)
   if (monthFilter.value) query.set('month', monthFilter.value)
   if (submittedSearch.value.trim()) query.set('q', submittedSearch.value.trim())
+  if (page.value > 1) query.set('page', String(page.value))
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  window.history.pushState({}, '', `${window.location.pathname}${suffix}`)
+  const method = replace ? 'replaceState' : 'pushState'
+  window.history[method]({}, '', `${window.location.pathname}${suffix}`)
 }
 
 async function loadPosts() {
   loading.value = true
   error.value = ''
   try {
-    const response = await listPosts({
+    let response = await listPosts({
       search: submittedSearch.value,
       category: categoryFilter.value,
       tag: tagFilter.value,
@@ -50,6 +60,19 @@ async function loadPosts() {
       page: page.value,
       pageSize: pageSize.value,
     })
+    const lastPage = Math.max(1, Math.ceil(response.total / pageSize.value))
+    if (page.value > lastPage) {
+      page.value = lastPage
+      updateFilterURL(true)
+      response = await listPosts({
+        search: submittedSearch.value,
+        category: categoryFilter.value,
+        tag: tagFilter.value,
+        month: monthFilter.value,
+        page: page.value,
+        pageSize: pageSize.value,
+      })
+    }
     posts.value = response.items
     total.value = response.total
   } catch (reason) {
@@ -59,20 +82,27 @@ async function loadPosts() {
   }
 }
 
-async function loadTerms() {
-  const collected: Term[] = []
-  let pageNo = 1
-  let termTotal = 0
+async function loadTerms(pageNo = 1) {
+  if (termsLoading.value) return
+  termsRetryPage.value = pageNo
+  termsLoading.value = true
+  termsError.value = false
   try {
-    do {
-      const response = await listTerms(false, pageNo, 100)
-      collected.push(...response.items)
-      termTotal = response.total
-      pageNo += 1
-    } while (collected.length < termTotal && pageNo <= 20)
-    terms.value = collected
+    const response = await listTerms(false, pageNo, termsPerBatch)
+    terms.value = pageNo === 1 ? response.items : [...terms.value, ...response.items]
+    termsPage.value = response.page
+    termsTotal.value = response.total
   } catch {
-    terms.value = []
+    if (pageNo === 1) terms.value = []
+    termsError.value = true
+  } finally {
+    termsLoading.value = false
+  }
+}
+
+function loadMoreTerms() {
+  if (!termsLoading.value && terms.value.length < termsTotal.value) {
+    void loadTerms(termsPage.value + 1)
   }
 }
 
@@ -113,6 +143,7 @@ function clearTerms() {
 function changePage(nextPage: number) {
   if (nextPage < 1 || nextPage > totalPages.value || nextPage === page.value) return
   page.value = nextPage
+  updateFilterURL()
   void loadPosts()
 }
 
@@ -198,21 +229,29 @@ onUnmounted(() => {
     <h1>{{ siteName || '博客' }}</h1>
     <p v-if="siteDescription">{{ siteDescription }}</p>
     <form class="search-bar" @submit.prevent="submitSearch">
-      <input id="reader-search" v-model="search" type="search" placeholder="搜索标题或正文" aria-label="搜索文章" @keydown="blurSearch" />
+      <input id="reader-search" v-model="search" type="search" maxlength="200" placeholder="搜索标题或正文" aria-label="搜索文章" aria-describedby="reader-search-hint" @keydown="blurSearch" />
       <button class="button button-primary" type="submit">搜索</button>
       <button v-if="submittedSearch" class="button" type="button" @click="clearSearch">清除</button>
     </form>
-    <p class="search-hint">按 / 聚焦搜索，Esc 取消焦点</p>
+    <p id="reader-search-hint" class="search-hint">最多 200 个字符；按 / 聚焦搜索，Esc 取消焦点</p>
   </header>
-  <div v-if="terms.length" class="term-filter-bar" aria-label="按分类或标签筛选">
+  <div v-if="terms.length || termsError" class="term-filter-bar" aria-label="按分类或标签筛选">
     <button class="term-filter" type="button" :class="{ active: !categoryFilter && !tagFilter }" @click="clearTerms">全部</button>
-    <div v-if="categories.length" class="term-group">
-      <span class="term-group-label">分类</span>
-      <a v-for="term in categories" :key="term.id" class="term-filter" :class="{ active: categoryFilter === term.slug }" :href="termURL(term)" @click.prevent="selectTerm(term)">{{ term.name }} <small>{{ term.postCount }}</small></a>
-    </div>
-    <div v-if="tags.length" class="term-group">
-      <span class="term-group-label">标签</span>
-      <a v-for="term in tags" :key="term.id" class="term-filter" :class="{ active: tagFilter === term.slug }" :href="termURL(term)" @click.prevent="selectTerm(term)">{{ term.name }} <small>{{ term.postCount }}</small></a>
+    <details v-if="categories.length" class="term-group">
+      <summary>分类 <small>{{ categories.length }}</small></summary>
+      <div class="term-group-options">
+        <a v-for="term in categories" :key="term.id" class="term-filter" :class="{ active: categoryFilter === term.slug }" :href="termURL(term)" @click.prevent="selectTerm(term)">{{ term.name }} <small>{{ term.postCount }}</small></a>
+      </div>
+    </details>
+    <details v-if="tags.length" class="term-group">
+      <summary>标签 <small>{{ tags.length }}</small></summary>
+      <div class="term-group-options">
+        <a v-for="term in tags" :key="term.id" class="term-filter" :class="{ active: tagFilter === term.slug }" :href="termURL(term)" @click.prevent="selectTerm(term)">{{ term.name }} <small>{{ term.postCount }}</small></a>
+      </div>
+    </details>
+    <div v-if="termsError || terms.length < termsTotal" class="term-load-control">
+      <span>{{ termsError ? '分类和标签加载失败' : `已载入 ${terms.length} / ${termsTotal} 个筛选` }}</span>
+      <button class="text-button" type="button" :disabled="termsLoading" @click="termsError ? loadTerms(termsRetryPage) : loadMoreTerms()">{{ termsLoading ? '加载中…' : termsError ? '重试' : '加载更多' }}</button>
     </div>
   </div>
   <div v-if="activeFilterLabel" class="month-filter-bar"><span>当前筛选 {{ activeFilterLabel }}</span><button class="text-button" type="button" @click="clearAllFilters">查看全部</button></div>

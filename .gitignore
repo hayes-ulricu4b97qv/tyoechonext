@@ -31,3 +31,4 @@ data/
 bin/
 /typecho-next.exe
 .e2e-artifacts/
+/ck/

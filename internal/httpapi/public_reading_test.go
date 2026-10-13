@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/config"
+	"github.com/untesheazulchunghu-beep/typecho/internal/service"
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 	_ "time/tzdata"
 )
@@ -69,6 +70,13 @@ func TestPublicReadingSurfaces(t *testing.T) {
 	site := status["site"].(map[string]any)
 	if site["description"] != "园子里的笔记" || site["keywords"] != "笔记, Go" {
 		t.Fatalf("anonymous site payload = %#v", site)
+	}
+	if _, exists := site["adminMail"]; exists {
+		t.Fatalf("anonymous site status leaked the administrative email: %#v", site)
+	}
+	ownerSite := get(t, owner, server.URL+"/api/v1/settings/site")
+	if ownerSite["adminMail"] != "owner@example.com" {
+		t.Fatalf("owner site settings lost the administrative email: %#v", ownerSite)
 	}
 	feed, mediaType := readFeed(t, public, server.URL+"/feed.xml")
 	if !strings.Contains(mediaType, "rss") || feed.Version != "2.0" || feed.Channel.Description != "园子里的笔记" {
@@ -151,6 +159,12 @@ func TestPublicReadingSurfaces(t *testing.T) {
 		t.Fatalf("api draft = %#v", apiDraft)
 	}
 
+	published = append(published,
+		saveTimedPost(t, repo, "post-dst-before", "dst-before", "DST before", time.Date(2024, 3, 1, 7, 59, 59, 999999999, time.UTC), "published"),
+		saveTimedPost(t, repo, "post-dst-start", "dst-start", "DST start", time.Date(2024, 3, 1, 8, 0, 0, 0, time.UTC), "published"),
+		saveTimedPost(t, repo, "post-dst-end-minus", "dst-end-minus", "DST end minus", time.Date(2024, 4, 1, 6, 59, 59, 999999999, time.UTC), "published"),
+		saveTimedPost(t, repo, "post-dst-end", "dst-end", "DST end", time.Date(2024, 4, 1, 7, 0, 0, 0, time.UTC), "published"),
+	)
 	assertArchive(t, public, server.URL, "America/Los_Angeles", published)
 	invalidZone := putJSON(t, owner, server.URL+"/api/v1/settings/site", map[string]string{
 		"name": "海岸", "url": "https://example.com", "adminMail": "owner@example.com",
@@ -160,6 +174,24 @@ func TestPublicReadingSurfaces(t *testing.T) {
 		t.Fatalf("invalid timezone = %#v", invalidZone)
 	}
 	assertArchive(t, public, server.URL, "America/Los_Angeles", published)
+	for _, siteURL := range []string{
+		"https://example.com/blog",
+		"https://example.com/?campaign=test",
+		"https://example.com/#section",
+		"https://owner:secret@example.com",
+	} {
+		invalidAddress := putJSON(t, owner, server.URL+"/api/v1/settings/site", map[string]string{
+			"name": "海岸", "url": siteURL, "adminMail": "owner@example.com",
+			"timezone": "America/Los_Angeles", "description": "", "keywords": "笔记, Go",
+		}, http.StatusUnprocessableEntity)
+		if invalidAddress["error"].(map[string]any)["code"] != "validation_error" {
+			t.Fatalf("invalid site URL %q = %#v", siteURL, invalidAddress)
+		}
+	}
+	unchangedSite := get(t, owner, server.URL+"/api/v1/settings/site")
+	if unchangedSite["url"] != "https://example.com" {
+		t.Fatalf("failed site URL updates changed the stored address: %#v", unchangedSite)
+	}
 	putJSON(t, owner, server.URL+"/api/v1/settings/site", map[string]string{
 		"name": "海岸", "url": "https://example.com", "adminMail": "owner@example.com",
 		"timezone": "UTC", "description": "", "keywords": "笔记, Go",
@@ -223,14 +255,14 @@ type timedPost struct {
 	at   time.Time
 }
 
-func newAPIServer(t *testing.T) (*store.SQLiteRepository, *httptest.Server, *http.Client) {
+func newAPIServer(t *testing.T, mailers ...service.Mailer) (*store.SQLiteRepository, *httptest.Server, *http.Client) {
 	t.Helper()
 	dir := t.TempDir()
 	repo, err := store.NewSQLiteRepository(filepath.Join(dir, "app.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(NewServer(repo, config.Settings{Version: "test", SessionTTLMin: 60}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	server := httptest.NewServer(NewServer(repo, config.Settings{Version: "test", SessionTTLMin: 60}, slog.New(slog.NewTextHandler(io.Discard, nil)), mailers...).Handler())
 	t.Cleanup(server.Close)
 	t.Cleanup(func() { _ = repo.Close() })
 	jar, err := cookiejar.New(nil)

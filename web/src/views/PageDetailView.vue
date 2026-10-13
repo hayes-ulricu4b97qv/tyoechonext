@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ApiError } from '../api'
 import { getPage } from '../api/content'
+import { renderMarkdown } from '../markdown'
 import { setDocumentMeta } from '../meta'
 import type { Page, Status } from '../types'
 
@@ -15,7 +14,7 @@ const page = ref<Page | null>(null)
 const loading = ref(true)
 const error = ref('')
 const progress = ref(0)
-const renderedContent = computed(() => DOMPurify.sanitize(String(marked.parse(page.value?.content ?? '', { async: false }))))
+const renderedContent = computed(() => renderMarkdown(page.value?.content ?? ''))
 const readingLabel = computed(() => {
   const text = page.value?.content.replace(/\s+/g, '') ?? ''
   if (!text) return ''

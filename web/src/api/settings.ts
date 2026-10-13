@@ -1,5 +1,5 @@
 import { api, postJSON, putJSON } from '../api'
-import type { AuditPage, ReadingSettings, Site, Stats, UserRecord } from '../types'
+import type { AuditPage, ReadingSettings, SiteSettings, Stats, UserRecord } from '../types'
 
 export interface SiteInput {
   name: string
@@ -29,7 +29,11 @@ export function getDashboardStats() {
 }
 
 export function updateSite(input: SiteInput) {
-  return putJSON<Site>('/api/v1/settings/site', input)
+  return putJSON<SiteSettings>('/api/v1/settings/site', input)
+}
+
+export function getSite() {
+  return api<SiteSettings>('/api/v1/settings/site')
 }
 
 export function getReading() {

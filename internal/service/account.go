@@ -17,7 +17,8 @@ func (s *Service) Initialize(input SetupInput) (*store.Site, error) {
 	if strings.TrimSpace(input.Timezone) == "" {
 		input.Timezone = "Asia/Shanghai"
 	}
-	if _, err := time.LoadLocation(strings.TrimSpace(input.Timezone)); err != nil {
+	input.Timezone = strings.TrimSpace(input.Timezone)
+	if _, err := time.LoadLocation(input.Timezone); err != nil {
 		return nil, fmt.Errorf("%w: 时区必须是有效的 IANA 名称", ErrValidation)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.AdminPassword), bcrypt.DefaultCost)
@@ -95,6 +96,9 @@ func (s *Service) UpdateAdminAccount(input AccountInput) (*store.Admin, error) {
 		if len(input.NewPassword) < 8 {
 			return nil, fmt.Errorf("%w: 新密码至少 8 个字符", ErrValidation)
 		}
+		if err := validateBcryptInput(input.NewPassword, "新密码"); err != nil {
+			return nil, err
+		}
 		passwordHashBytes, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
 		if err != nil {
 			return nil, fmt.Errorf("hash administrator password: %w", err)
@@ -166,6 +170,9 @@ func (s *Service) UpdateUser(username string, input UserInput) (*store.User, err
 		if len(input.Password) < 8 {
 			return nil, fmt.Errorf("%w: 密码至少 8 个字符", ErrValidation)
 		}
+		if err := validateBcryptInput(input.Password, "密码"); err != nil {
+			return nil, err
+		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 		if err != nil {
 			return nil, fmt.Errorf("hash user password: %w", err)
@@ -203,8 +210,8 @@ func (s *Service) Site() (*store.Site, error) {
 }
 
 func (s *Service) UpdateSite(site store.Site) (*store.Site, error) {
-	if strings.TrimSpace(site.Name) == "" || !validURL(site.URL) || !validEmail(site.AdminMail) {
-		return nil, fmt.Errorf("%w: 需要站点名称、有效地址和有效的管理员邮箱", ErrValidation)
+	if strings.TrimSpace(site.Name) == "" || !validSiteURL(site.URL) || !validEmail(site.AdminMail) {
+		return nil, fmt.Errorf("%w: 需要站点名称、只含协议和域名的站点地址，以及有效的管理员邮箱", ErrValidation)
 	}
 	current, err := s.repo.Site()
 	if err != nil {

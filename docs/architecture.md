@@ -28,16 +28,22 @@ web/dist/            Vite 构建产物（运行前生成）
 | `/healthz` | 存活检查，初始化前也返回正常 |
 | `/readyz` | 就绪检查，初始化完成前返回 503 |
 
-服务启动时打开 `APP_DATA_DIR/app.db`。首次启动会创建本应用的 schema，之后继续执行本应用已有的列升级。没有初始化记录时，页面请求转到 `/setting`，初始化成功后才开放 `/admin` 和 `/user`。
+服务启动时打开 `APP_DATA_DIR/app.db`。空数据库会在单个事务中创建当前完整 schema，并写入 `PRAGMA user_version`。项目不迁移旧版数据库；检测到无版本号的非空数据库或不支持的版本时会停止启动，并提示删除 `app.db` 及其 WAL/SHM 文件后重新初始化。没有初始化记录时，页面请求转到 `/setting`，初始化成功后才开放 `/admin` 和 `/user`。
 
-文章接口支持 `q`、`category`、`tag`、`month`、`order`、`page` 和 `pageSize` 参数。`order` 默认按 `published_at`，传入 `updated` 时按更新时间。显式传入 1 到 100 之外的 `pageSize` 会返回校验错误。公开接口只返回已发布且发布时间不晚于当前时刻的文章，内容编辑者可以带 `includeDraft=true` 读取草稿。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希、`users.id` 和过期时间，因此服务重启后，同一数据库上的登录会话仍然有效。会话寿命由 `APP_SESSION_TTL_MIN` 决定，缺省 1440 分钟。
-文章和页面搜索使用词元索引，并按字面匹配用户输入，`%` 与 `_` 不会被当作通配符。分类和标签名称仍用带转义的 `LIKE`。
+文章接口支持 `q`、`category`、`tag`、`month`、`order`、`status`、`page` 和 `pageSize` 参数。`order` 默认按 `published_at`，传入 `updated` 时按更新时间。`status` 可指定 `draft` 或 `published`；草稿筛选只向内容编辑者开放，并在 SQL 分页前应用，因此筛选总数与页码一致。显式传入 1 到 100 之外的 `pageSize` 会返回校验错误。公开接口只返回已发布且发布时间不晚于当前时刻的文章，内容编辑者也可以带 `includeDraft=true` 读取全部草稿和排期文章。文章列表只从 SQLite 读取摘要字段，不加载正文；详情接口和 RSS 才按需读取正文。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希、`users.id` 和过期时间，因此服务重启后，同一数据库上的登录会话仍然有效。会话寿命由 `APP_SESSION_TTL_MIN` 决定，缺省 1440 分钟。
+唯一键冲突统一转为 HTTP 409；文章、页面、分类/标签和用户名分别返回稳定的 `post_taken`、`page_taken`、`term_taken`、`username_taken` 错误码。错误分类依据 SQLite 约束码，不解析驱动错误文本。
+未知 `/api/v1` 路径和不支持的 HTTP 方法也返回统一的 `{error:{code,message}}` JSON；方法错误保留 `Allow` 响应头，便于客户端诊断路由问题。
+文章摘要列表将当前页文章的分类、标签和公开文章计数批量查询，避免对每篇文章单独读取关联。文章和页面搜索使用词元索引，并按字面匹配用户输入，`%` 与 `_` 不会被当作通配符；所有 `q` 参数最多接受 200 个 Unicode 字符，避免超长输入触发无界搜索工作。候选词元在一次分组查询中读取，分类和标签名称仍用带转义的 `LIKE`。
+
+读者端正文和管理端 Markdown 预览共用 `web/src/markdown.ts`，由 `marked` 转换并经 DOMPurify 净化后再写入 DOM。媒体插入保留编辑器中的光标或选区，可用于文章和独立页面。
 
 `/feed.xml` 只收录已发布文章，按发布时间排序，描述使用摘要或截断后的正文。`/sitemap.xml` 包含读者首页、已发布文章、公开分类与标签、已发布独立页面。`/robots.txt` 允许 `/`，禁止 `/admin` 和 `/setting`，站点 URL 存在时附上 `Sitemap`。Vue 用户端不生成这些文件。
 
 审计事件写入 SQLite 的 `audit_events` 表，并通过 owner-only 的 `GET /api/v1/audit` 查询；文章、评论、媒体、用户、账户和站点的成功变更都会记录操作者、资源和必要的变更详情。
 
 写请求采用双提交 CSRF 令牌：Go 服务设置非 HttpOnly 的 `app_csrf` cookie，Vue API 客户端复制到 `X-CSRF-Token`；初始化和登录是仅有的无需既有令牌的写入口，匿名评论仍不要求登录。
+
+所有响应带有资源来源策略：脚本、连接、表单和基础 URL 限定本站，禁止对象嵌入和页面被框架加载；本站 Markdown 图片仍可引用远程 HTTP/HTTPS 图片，Vue 动态样式继续可用。
 
 管理员会话还可以通过 `PUT /api/v1/settings/account` 更新账户邮箱，或在提交 `currentPassword` 与 `newPassword` 时修改密码。密码修改沿用 bcrypt 哈希，会话按 `users.id` 关联并在换密时撤销其他令牌。邮箱和密码都写在所有者的 `users` 记录上。
 
@@ -48,24 +54,32 @@ web/dist/            Vite 构建产物（运行前生成）
 
 文章还可以提交 `categories` 和 `tags` 名称数组；Go 服务维护 `terms` 与 `post_terms` 关系表，`GET /api/v1/content/terms` 返回分类、标签及已发布文章数，内容编辑者可通过 `POST/PUT/DELETE /api/v1/content/terms` 管理词条。
 文章列表支持 `category=<slug>` 和/或 `tag=<slug>` 筛选，同时提供两个参数时返回两个词条的交集；草稿仍只会在有内容编辑权限的会话中返回。
-Vue 用户端会从公开词条接口生成筛选导航，分类、标签和搜索状态写入 URL，因此可以直接分享并支持浏览器前进后退。
+Vue 用户端会从公开词条接口生成筛选导航，页面链接与分类/标签按批次载入以限制首屏列表长度；分类、标签和搜索状态写入 URL，因此可以直接分享并支持浏览器前进后退。
 
-独立页面使用 `pages` 表和独立 API：公开端通过 `GET /api/v1/content/pages/{slug}` 读取，内容编辑者通过 `GET/POST /api/v1/content/pages`、`PUT/DELETE /api/v1/content/pages/{id}` 管理。
+文章可以提交 `customFields` 字符串映射，每篇最多 50 项，字段名最多 80 个字符、字段值最多 2,000 个字符，合计最多 20,000 个字符。字段存入 `posts.custom_fields`，文章修订会一并保存字段快照；更新时省略 `customFields` 会保留已有值，提交空对象会清空。公开列表不返回自定义字段，详情只在正文可见时返回，因此阅读口令也同时保护字段。读者端以文本方式展示字段值，不把它作为 HTML 渲染。
+
+独立页面使用 `pages` 表和独立 API：公开端通过 `GET /api/v1/content/pages/{slug}` 读取，内容编辑者通过 `GET/POST /api/v1/content/pages`、`PUT/DELETE /api/v1/content/pages/{id}` 管理。公开页面列表、详情、服务端 HTML 和站点地图只包含 `published_at` 不晚于当前时刻的已发布页面；草稿、无发布时间和未来排期页面都对匿名读者返回不可见。
 
 评论通过文章路由提交：`POST /api/v1/content/posts/{slug}/comments` 按站点阅读设置决定结果。默认新评论进入待审核；所有者关闭“新评论需要审核”后，评论会直接公开。公开列表只返回 `approved` 评论。管理员可以通过 `/api/v1/content/comments?status=pending` 获取待审核列表，并用 `PUT /api/v1/content/comments/{id}` 将评论设为 `approved`、`pending` 或 `spam`，也可以删除评论。
 
 所有者通过 `GET/PUT /api/v1/settings/reading` 管理阅读与评论：`postsPerPage`（1–50，公开文章列表未传 `pageSize` 时使用）、`commentsEnabled`、`commentsRequireModeration` 和 `commentsThreaded`。文章还可以单独设置 `allowComment`；站点或文章关闭评论时，创建评论会被拒绝。开启回复后，评论可以带 `parentId`，父评论必须是同一篇文章里已通过的评论，嵌套最多三层。公开状态接口会带上 `reading`，读者端据此分页、决定是否展示评论表单，并把回复按时间排成线程。
 
-所有者还可以在站点设置里保存 `description` 和 `keywords`。匿名公开状态会带回这两个字段。描述非空时，`/feed.xml` 的频道描述使用这段文字；描述为空时仍回退为站点名加 ` latest posts`。编辑和审核员不能修改站点字段。
+所有者还可以在站点设置里保存 `description` 和 `keywords`。匿名公开状态会带回这两个字段。描述非空时，`/feed.xml` 的频道描述使用这段文字；描述为空时仍回退为站点名加 ` latest posts`。站点地址只接受 http(s) 协议和域名，可带末尾斜线，不接受路径、查询参数、片段或用户信息，因为本站链接和静态资源都从域名根路径提供。编辑和审核员不能修改站点字段。
+
+Go 服务在返回公开文章和独立页面的应用壳前，会把标题、摘要、GFM Markdown 正文和 Open Graph 元数据写入初始 HTML。Goldmark 默认安全渲染器不会输出原始 HTML 或危险链接；口令保护文章不会在初始 HTML 暴露正文。管理页与带 `preview=true` 的页面标记为 `noindex, nofollow`。
+
+读者首页 `/user` 的初始 HTML 还会输出公开文章摘要、分类/标签链接、搜索表单、结果总数和分页链接，使关闭 JavaScript 时仍能搜索并继续浏览。服务端分页使用站点 `postsPerPage`（无效设置回退到 10，最大 50），按 URL 中的 `q`、`category`、`tag`、`month` 和 `page` 查询；列表不读取文章正文，草稿与未来发布时间文章由公开查询排除。Vue 端从相同 URL 状态加载内容，筛选与分页链接可复制，也支持浏览器前进和后退。
 
 公开文章详情带有按发布时间排序的上一篇和下一篇，同一发布时间用文章 ID 做稳定次序，草稿不会成为邻居。`GET /api/v1/content/archive` 按站点 IANA 时区把已发布文章收成月份计数；`GET /api/v1/content/posts?month=YYYY-MM` 返回该月的公开列表。`order=published` 按发布时间返回文章。`GET /api/v1/content/comments/recent` 只返回已发布文章下的已通过评论。Vue 读者端用这些接口渲染站点描述、相邻文章、月份归档、最新文章和最近回复。
 
 媒体由 Go 服务保存到 `APP_MEDIA_DIR`，元数据写入 SQLite。管理员通过 `POST /api/v1/media` 上传图片，服务只接受 JPEG、PNG、GIF 和 WebP，单文件上限 10 MB；公开文件通过 `/media/{id}` 读取，删除时同时清理元数据和文件。
 
-用户保存在 `users` 表。初始化直接创建 `owner`；其他账户可以是 `editor` 或 `moderator`。编辑者负责文章和媒体，审核员负责评论，站点、账户和用户管理只对所有者开放。停用用户后，其持久会话会在下一次请求时失效。
+用户保存在 `users` 表。初始化直接创建 `owner`；其他账户可以是 `editor` 或 `moderator`。编辑者负责文章和媒体，审核员负责评论，站点、账户和用户管理只对所有者开放。停用用户后，其持久会话会在下一次请求时失效。密码和文章阅读口令由 bcrypt 处理，输入最多 72 个 UTF-8 字节；超出时 API 返回 422 校验错误，不会截断输入。
 
 所有者用户管理接口为 `GET/POST /api/v1/settings/users`、`PUT/DELETE /api/v1/settings/users/{username}`；密码只在服务端生成 bcrypt 哈希，HTTP 响应不会返回密码字段。更换所有者密码时会保留当前会话并撤销其他会话；工作人员被停用或删除时会清理其会话。
 所有者通过用户更新接口提交新密码即可重置工作人员密码，服务会撤销该用户已有会话。
+
+密码找回通过 `POST /api/v1/auth/forgot` 和 `POST /api/v1/auth/reset` 完成。找回请求需要安全 SMTP 投递，口令只发到请求账户登记的邮箱，数据库只保存口令哈希；对外响应不泄露账户是否存在。SMTP 未配置时，找回接口会对所有账户返回相同的服务不可用响应。请求同时按来源和有效账户限流，账户限流配置见 [operations.md](operations.md)。待审核评论进入 `outbound_mail` 站内通知历史，所有者通过分页的 `GET /api/v1/mail` 查看；记录最多保留 90 天和 1000 条。SMTP 配置项及 TLS 要求见 [operations.md](operations.md)。
 
 ## Windows 本地运行
 

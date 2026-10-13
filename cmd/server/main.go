@@ -13,6 +13,8 @@ import (
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/config"
 	"github.com/untesheazulchunghu-beep/typecho/internal/httpapi"
+	"github.com/untesheazulchunghu-beep/typecho/internal/mailer"
+	"github.com/untesheazulchunghu-beep/typecho/internal/service"
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 )
 
@@ -20,6 +22,16 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	dataDir := envOr("APP_DATA_DIR", "./data")
 	port := envOr("APP_PORT", "8080")
+	settings := config.FromEnv()
+	smtpMailer, err := mailer.FromEnv()
+	if err != nil {
+		logger.Error("configure SMTP mail delivery", "error", err)
+		os.Exit(1)
+	}
+	var configuredMailer service.Mailer
+	if smtpMailer != nil {
+		configuredMailer = smtpMailer
+	}
 
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		logger.Error("create data directory", "error", err)
@@ -34,14 +46,13 @@ func main() {
 	}
 	defer repository.Close()
 
-	settings := config.FromEnv()
-	server := httpapi.NewServer(repository, settings, logger)
+	server := httpapi.NewServer(repository, settings, logger, configuredMailer)
 	httpServer := &http.Server{
 		Addr:              ":" + port,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       20 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      settings.WriteTimeout,
 		IdleTimeout:       60 * time.Second,
 	}
 

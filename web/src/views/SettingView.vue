@@ -2,8 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api, ApiError, postJSON, putJSON } from '../api'
 import { setDocumentMeta } from '../meta'
-import { getReading, updateReading } from '../api/settings'
-import type { AuditEvent, AuditPage, ReadingSettings, Site, Status, UserRecord } from '../types'
+import { getReading, getSite, updateReading } from '../api/settings'
+import type { AuditEvent, AuditPage, ReadingSettings, SiteSettings, Status, UserRecord } from '../types'
 
 const props = defineProps<{ status: Status }>()
 const initialized = props.status.initialized
@@ -34,14 +34,14 @@ const auditPageSize = 20
 const form = reactive({
   siteName: props.status.site?.name ?? '',
   siteUrl: props.status.site?.url ?? window.location.origin,
-  adminEmail: props.status.site?.adminMail ?? '',
+  adminEmail: '',
   timezone: props.status.site?.timezone ?? 'Asia/Shanghai',
   description: props.status.site?.description ?? '',
   keywords: props.status.site?.keywords ?? '',
   adminUsername: '',
   adminPassword: '',
 })
-const accountForm = reactive({ email: props.status.site?.adminMail ?? '', currentPassword: '', newPassword: '' })
+const accountForm = reactive({ email: '', currentPassword: '', newPassword: '' })
 const userForm = reactive({ username: '', email: '', password: '', role: 'editor' as 'editor' | 'moderator' })
 const readingForm = reactive<ReadingSettings>({
   postsPerPage: props.status.reading?.postsPerPage ?? 10,
@@ -92,7 +92,14 @@ async function loadAccount() {
     savedEmail.value = response.user.email
     canManageUsers.value = response.user.role === 'owner'
     if (canManageUsers.value) {
-      await Promise.all([loadUsers(), loadAudit(), loadReading()])
+      const [site] = await Promise.all([getSite(), loadUsers(), loadAudit(), loadReading()])
+      form.siteName = site.name
+      form.siteUrl = site.url
+      form.adminEmail = site.adminMail
+      form.timezone = site.timezone
+      form.description = site.description
+      form.keywords = site.keywords
+      savedSite.value = siteSnapshot()
       await nextTick()
       bindSettingsSections()
     }
@@ -175,7 +182,7 @@ async function submit() {
       window.location.replace('/admin')
       return
     }
-    await putJSON<Site>('/api/v1/settings/site', {
+    await putJSON<SiteSettings>('/api/v1/settings/site', {
       name: form.siteName,
       url: form.siteUrl,
       adminMail: form.adminEmail,
@@ -299,7 +306,7 @@ onUnmounted(() => {
         <section v-if="!initialized || canManageUsers" id="site" class="settings-block">
           <p class="eyebrow">{{ initialized ? '站点' : '第一次设置' }}</p>
           <h2>{{ initialized ? '站点信息' : '创建站点和管理员' }}</h2>
-          <p class="settings-lead">{{ initialized ? '名称、地址和描述会出现在阅读页与页面标题里。' : '填完这一张表，管理端和阅读页就会打开。' }}</p>
+          <p class="settings-lead">{{ initialized ? '名称、根地址和描述会用于阅读页、订阅源与搜索引擎信息。站点地址只填协议和域名，例如 https://example.com。' : '填完这一张表，管理端和阅读页就会打开。站点地址只填协议和域名，例如 https://example.com。' }}</p>
           <form @submit.prevent="submit">
             <fieldset class="settings-fieldset" :disabled="submitting || (initialized && !accountChecked)">
               <legend>站点</legend>

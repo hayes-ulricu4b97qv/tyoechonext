@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/config"
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
@@ -118,6 +120,60 @@ func TestReadingPolicyAndCommentThreads(t *testing.T) {
 	page := get(t, publicClient, server.URL+"/api/v1/content/posts")
 	if page["pageSize"].(float64) != 2 || page["total"].(float64) != 4 {
 		t.Fatalf("public list should use the reading page size: %#v", page)
+	}
+}
+
+func TestPublicCommentPaginationKeepsPageBoundariesAndReplies(t *testing.T) {
+	repo, server, owner := newAPIServer(t)
+	setupSite(t, owner, server.URL, "UTC")
+	post := postJSON(t, owner, server.URL+"/api/v1/content/posts", map[string]any{
+		"title": "Many comments", "content": "Body", "status": "published", "allowComment": true,
+	}, http.StatusCreated)
+	postID := post["id"].(string)
+	slug := post["slug"].(string)
+	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 205; index++ {
+		id := fmt.Sprintf("comment-%03d", index)
+		parentID := ""
+		if index == 150 {
+			parentID = "comment-000"
+		}
+		if _, err := repo.SaveComment(store.Comment{
+			ID: id, PostID: postID, ParentID: parentID, AuthorName: "Reader", Content: id,
+			Status: "approved", CreatedAt: baseTime.Add(time.Duration(index) * time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	public := &http.Client{}
+	pageSizes := []int{100, 100, 5}
+	firstIDs := []string{"comment-204", "comment-104", "comment-004"}
+	seen := make(map[string]bool, 205)
+	for index, wantSize := range pageSizes {
+		pageNumber := index + 1
+		response := get(t, public, fmt.Sprintf("%s/api/v1/content/posts/%s/comments?page=%d&pageSize=100", server.URL, url.PathEscape(slug), pageNumber))
+		if int(response["total"].(float64)) != 205 || int(response["page"].(float64)) != pageNumber || int(response["pageSize"].(float64)) != 100 {
+			t.Fatalf("page metadata = %#v", response)
+		}
+		items := response["items"].([]any)
+		if len(items) != wantSize || items[0].(map[string]any)["id"] != firstIDs[index] {
+			t.Fatalf("page %d item count=%d first=%#v", pageNumber, len(items), items[0])
+		}
+		for _, raw := range items {
+			comment := raw.(map[string]any)
+			id := comment["id"].(string)
+			if seen[id] {
+				t.Fatalf("comment %s repeated across pages", id)
+			}
+			seen[id] = true
+			if id == "comment-150" && comment["parentId"] != "comment-000" {
+				t.Fatalf("cross-page reply parent = %#v", comment["parentId"])
+			}
+		}
+	}
+	if len(seen) != 205 {
+		t.Fatalf("collected %d unique comments, want 205", len(seen))
 	}
 }
 

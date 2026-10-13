@@ -9,7 +9,7 @@ import (
 )
 
 func (r *SQLiteRepository) Posts() ([]Post, error) {
-	rows, err := r.db.Query(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at, passphrase_hash FROM posts ORDER BY updated_at DESC, id DESC`)
+	rows, err := r.db.Query(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at, passphrase_hash, custom_fields FROM posts ORDER BY updated_at DESC, id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list posts: %w", err)
 	}
@@ -28,10 +28,8 @@ func (r *SQLiteRepository) Posts() ([]Post, error) {
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close posts: %w", err)
 	}
-	for index := range posts {
-		if err := r.populatePostTerms(&posts[index]); err != nil {
-			return nil, err
-		}
+	if err := r.populatePostTermsForPosts(posts); err != nil {
+		return nil, err
 	}
 	return posts, nil
 }
@@ -41,10 +39,23 @@ func (r *SQLiteRepository) SearchPosts(query PostQuery) (PostPage, error) {
 	search := strings.TrimSpace(query.Search)
 	where := "1 = 1"
 	args := make([]any, 0, 5)
-	if !query.IncludeDrafts {
-		now := time.Now().UTC().Format("2006-01-02T15:04:05")
-		where += " AND status = 'published' AND published_at != '' AND substr(published_at, 1, 19) <= ?"
+	publicationWindow := !query.PublishedFrom.IsZero() || !query.PublishedBefore.IsZero()
+	if !query.IncludeDrafts || publicationWindow {
+		now := formatTime(time.Now().UTC())
+		where += " AND status = 'published' AND published_at IS NOT NULL AND published_at != '' AND published_at <= ?"
 		args = append(args, now)
+	}
+	if query.Status != "" {
+		where += " AND status = ?"
+		args = append(args, query.Status)
+	}
+	if !query.PublishedFrom.IsZero() {
+		where += " AND published_at >= ?"
+		args = append(args, formatTime(query.PublishedFrom))
+	}
+	if !query.PublishedBefore.IsZero() {
+		where += " AND published_at < ?"
+		args = append(args, formatTime(query.PublishedBefore))
 	}
 	if query.TermKind != "" && query.TermSlug != "" {
 		where += ` AND EXISTS (
@@ -79,14 +90,6 @@ func (r *SQLiteRepository) SearchPosts(query PostQuery) (PostPage, error) {
 		where += " AND " + clause
 		args = append(args, idArgs...)
 	}
-	if query.RestrictIDs {
-		if len(query.IDs) == 0 {
-			return PostPage{Items: []Post{}, Total: 0, Page: query.Page, PageSize: query.PageSize}, nil
-		}
-		clause, idArgs := idInClause(query.IDs)
-		where += " AND " + clause
-		args = append(args, idArgs...)
-	}
 	var total int
 	if err := r.db.QueryRow(`SELECT COUNT(*) FROM posts WHERE `+where, args...).Scan(&total); err != nil {
 		return PostPage{}, fmt.Errorf("count posts: %w", err)
@@ -96,14 +99,23 @@ func (r *SQLiteRepository) SearchPosts(query PostQuery) (PostPage, error) {
 		orderBy = "updated_at DESC, id DESC"
 	}
 	offset := (query.Page - 1) * query.PageSize
-	rows, err := r.db.Query(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at, passphrase_hash FROM posts WHERE `+where+` ORDER BY `+orderBy+` LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
+	selectColumns := "id, title, slug, excerpt, status, allow_comment, published_at, updated_at, passphrase_hash"
+	if query.IncludeContent {
+		selectColumns = "id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at, passphrase_hash, custom_fields"
+	}
+	rows, err := r.db.Query(`SELECT `+selectColumns+` FROM posts WHERE `+where+` ORDER BY `+orderBy+` LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
 	if err != nil {
 		return PostPage{}, fmt.Errorf("search posts: %w", err)
 	}
 	defer rows.Close()
 	items := make([]Post, 0, query.PageSize)
 	for rows.Next() {
-		post, err := scanPost(rows)
+		var post Post
+		if query.IncludeContent {
+			post, err = scanPost(rows)
+		} else {
+			post, err = scanPostSummary(rows)
+		}
 		if err != nil {
 			return PostPage{}, fmt.Errorf("scan searched post: %w", err)
 		}
@@ -115,16 +127,16 @@ func (r *SQLiteRepository) SearchPosts(query PostQuery) (PostPage, error) {
 	if err := rows.Close(); err != nil {
 		return PostPage{}, fmt.Errorf("close searched posts: %w", err)
 	}
-	for index := range items {
-		if err := r.populatePostTerms(&items[index]); err != nil {
-			return PostPage{}, err
-		}
+	if err := r.populatePostTermsForPosts(items); err != nil {
+		return PostPage{}, err
 	}
 	return PostPage{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }
 
 func (r *SQLiteRepository) ListPublishedMeta() ([]Post, error) {
-	rows, err := r.db.Query(`SELECT id, title, slug, published_at FROM posts WHERE status = 'published' AND published_at IS NOT NULL AND published_at != '' AND substr(published_at, 1, 19) <= ?`, time.Now().UTC().Format("2006-01-02T15:04:05"))
+	rows, err := r.db.Query(`SELECT id, title, slug, published_at FROM posts
+		WHERE status = 'published' AND published_at IS NOT NULL AND published_at != '' AND published_at <= ?
+		ORDER BY published_at DESC, id DESC`, formatTime(time.Now().UTC()))
 	if err != nil {
 		return nil, fmt.Errorf("list published posts: %w", err)
 	}
@@ -147,6 +159,45 @@ func (r *SQLiteRepository) ListPublishedMeta() ([]Post, error) {
 		return nil, fmt.Errorf("iterate published posts: %w", err)
 	}
 	return posts, nil
+}
+
+func (r *SQLiteRepository) PublishedNeighbors(post Post) (*Post, *Post, error) {
+	if post.Status != "published" || post.ID == "" || post.PublishedAt.IsZero() {
+		return nil, nil, nil
+	}
+	publishedAt := formatTime(post.PublishedAt)
+	now := formatTime(time.Now().UTC())
+	previous, err := r.publishedNeighbor("<", "DESC", publishedAt, post.ID, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	next, err := r.publishedNeighbor(">", "ASC", publishedAt, post.ID, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	return previous, next, nil
+}
+
+func (r *SQLiteRepository) publishedNeighbor(comparison, direction, publishedAt, id, now string) (*Post, error) {
+	query := `SELECT id, title, slug, published_at FROM posts
+		WHERE status = 'published' AND published_at IS NOT NULL AND published_at != '' AND published_at <= ?
+		AND (published_at, id) ` + comparison + ` (?, ?)
+		ORDER BY published_at ` + direction + `, id ` + direction + ` LIMIT 1`
+	var post Post
+	var storedPublishedAt string
+	err := r.db.QueryRow(query, now, publishedAt, id).Scan(&post.ID, &post.Title, &post.Slug, &storedPublishedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read published neighbor: %w", err)
+	}
+	post.Status = "published"
+	post.PublishedAt = parseTime(storedPublishedAt)
+	if post.PublishedAt.IsZero() {
+		return nil, fmt.Errorf("read published neighbor: invalid published_at %q", storedPublishedAt)
+	}
+	return &post, nil
 }
 
 func idInClause(ids []string) (string, []any) {
@@ -177,7 +228,7 @@ func (r *SQLiteRepository) PostBySlug(slug string) (Post, error) {
 }
 
 func (r *SQLiteRepository) postBy(where, value string) (Post, error) {
-	row := r.db.QueryRow(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at, passphrase_hash FROM posts WHERE `+where, value)
+	row := r.db.QueryRow(`SELECT id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at, passphrase_hash, custom_fields FROM posts WHERE `+where, value)
 	post, err := scanPost(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Post{}, ErrNotFound
@@ -206,6 +257,10 @@ func (r *SQLiteRepository) SavePost(post Post) (Post, error) {
 	if !post.PublishedAt.IsZero() {
 		publishedAt = formatTime(post.PublishedAt)
 	}
+	customFields, err := encodeCustomFields(post.CustomFields)
+	if err != nil {
+		return Post{}, err
+	}
 	tx, err := r.db.Begin()
 	if err != nil {
 		return Post{}, fmt.Errorf("start post save transaction: %w", err)
@@ -214,11 +269,11 @@ func (r *SQLiteRepository) SavePost(post Post) (Post, error) {
 	if err := r.snapshotPost(tx, post); err != nil {
 		return Post{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO posts(id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET title = excluded.title, slug = excluded.slug, excerpt = excluded.excerpt, content = excluded.content, status = excluded.status, allow_comment = excluded.allow_comment, published_at = excluded.published_at, updated_at = excluded.updated_at`,
-		post.ID, post.Title, post.Slug, post.Excerpt, post.Content, post.Status, boolToInt(post.AllowComment), publishedAt, formatTime(post.UpdatedAt)); err != nil {
-		return Post{}, fmt.Errorf("save post: %w", err)
+	if _, err := tx.Exec(`INSERT INTO posts(id, title, slug, excerpt, content, status, allow_comment, published_at, updated_at, custom_fields)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET title = excluded.title, slug = excluded.slug, excerpt = excluded.excerpt, content = excluded.content, status = excluded.status, allow_comment = excluded.allow_comment, published_at = excluded.published_at, updated_at = excluded.updated_at, custom_fields = excluded.custom_fields`,
+		post.ID, post.Title, post.Slug, post.Excerpt, post.Content, post.Status, boolToInt(post.AllowComment), publishedAt, formatTime(post.UpdatedAt), customFields); err != nil {
+		return Post{}, wrapSQLiteWriteError("save post", err)
 	}
 	if err := r.savePostTerms(tx, post.ID, post.Categories, post.Tags); err != nil {
 		return Post{}, err
@@ -238,30 +293,77 @@ func (r *SQLiteRepository) SavePost(post Post) (Post, error) {
 }
 
 func (r *SQLiteRepository) populatePostTerms(post *Post) error {
-	rows, err := r.db.Query(`SELECT t.id, t.name, t.slug, t.kind,
-		(SELECT COUNT(DISTINCT p2.id) FROM post_terms pt2 JOIN posts p2 ON p2.id = pt2.post_id
-		 WHERE pt2.term_id = t.id AND p2.status = 'published'), t.created_at, t.updated_at
-		FROM post_terms pt JOIN terms t ON t.id = pt.term_id
-		WHERE pt.post_id = ? ORDER BY CASE t.kind WHEN 'category' THEN 0 ELSE 1 END, t.name COLLATE NOCASE`, post.ID)
-	if err != nil {
-		return fmt.Errorf("list post terms: %w", err)
+	posts := []Post{*post}
+	if err := r.populatePostTermsForPosts(posts); err != nil {
+		return err
 	}
-	defer rows.Close()
-	post.Categories = nil
-	post.Tags = nil
-	for rows.Next() {
-		term, err := scanTerm(rows)
+	*post = posts[0]
+	return nil
+}
+
+func (r *SQLiteRepository) populatePostTermsForPosts(posts []Post) error {
+	const batchSize = 200
+	visibleAt := formatTime(time.Now().UTC())
+	for start := 0; start < len(posts); start += batchSize {
+		end := start + batchSize
+		if end > len(posts) {
+			end = len(posts)
+		}
+		batch := posts[start:end]
+		placeholders := make([]string, len(batch))
+		indexes := make(map[string]int, len(batch))
+		args := make([]any, 0, len(batch)+1)
+		for index, post := range batch {
+			placeholders[index] = "?"
+			args = append(args, post.ID)
+			indexes[post.ID] = index
+			batch[index].Categories = nil
+			batch[index].Tags = nil
+		}
+		args = append(args, visibleAt)
+		query := `WITH requested_terms AS (
+			SELECT post_id, term_id FROM post_terms WHERE post_id IN (` + strings.Join(placeholders, ",") + `)
+		), visible_counts AS (
+			SELECT pt2.term_id, COUNT(*) AS post_count
+			FROM post_terms pt2 JOIN posts p2 ON p2.id = pt2.post_id
+			WHERE pt2.term_id IN (SELECT DISTINCT term_id FROM requested_terms)
+				AND p2.status = 'published' AND p2.published_at IS NOT NULL AND p2.published_at != '' AND p2.published_at <= ?
+			GROUP BY pt2.term_id
+		)
+		SELECT requested_terms.post_id, t.id, t.name, t.slug, t.kind,
+			COALESCE(visible_counts.post_count, 0), t.created_at, t.updated_at
+			FROM requested_terms JOIN terms t ON t.id = requested_terms.term_id
+			LEFT JOIN visible_counts ON visible_counts.term_id = t.id
+			ORDER BY requested_terms.post_id, CASE t.kind WHEN 'category' THEN 0 ELSE 1 END, t.name COLLATE NOCASE`
+		rows, err := r.db.Query(query, args...)
 		if err != nil {
-			return fmt.Errorf("scan post term: %w", err)
+			return fmt.Errorf("list terms for posts: %w", err)
 		}
-		if term.Kind == "category" {
-			post.Categories = append(post.Categories, term)
-		} else {
-			post.Tags = append(post.Tags, term)
+		for rows.Next() {
+			var postID string
+			term, err := scanTermWithPostID(rows, &postID)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("scan post term: %w", err)
+			}
+			index, ok := indexes[postID]
+			if !ok {
+				rows.Close()
+				return fmt.Errorf("read term for unexpected post %q", postID)
+			}
+			if term.Kind == "category" {
+				batch[index].Categories = append(batch[index].Categories, term)
+			} else {
+				batch[index].Tags = append(batch[index].Tags, term)
+			}
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate post terms: %w", err)
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate post terms: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close post terms: %w", err)
+		}
 	}
 	return nil
 }
@@ -311,8 +413,16 @@ func upsertTermTx(tx *sql.Tx, kind, name string) (string, error) {
 		if err == nil {
 			return id, nil
 		}
-		if !strings.Contains(strings.ToUpper(err.Error()), "UNIQUE") {
+		if !isUniqueConstraintError(err) {
 			return "", fmt.Errorf("create post term: %w", err)
+		}
+		var existingID string
+		lookupErr := tx.QueryRow(`SELECT id FROM terms WHERE kind = ? AND name = ?`, kind, name).Scan(&existingID)
+		if lookupErr == nil {
+			return existingID, nil
+		}
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return "", fmt.Errorf("resolve post term conflict: %w", lookupErr)
 		}
 	}
 	return "", fmt.Errorf("unable to allocate a unique term slug")
@@ -339,16 +449,16 @@ func (r *SQLiteRepository) SaveTerm(term Term) (Term, error) {
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, slug = excluded.slug, kind = excluded.kind, updated_at = excluded.updated_at`,
 		term.ID, term.Name, term.Slug, term.Kind, formatTime(term.CreatedAt), formatTime(term.UpdatedAt))
 	if err != nil {
-		return Term{}, fmt.Errorf("save term: %w", err)
+		return Term{}, wrapSQLiteWriteError("save term", err)
 	}
 	return r.termByID(term.ID)
 }
 
 func (r *SQLiteRepository) termByID(id string) (Term, error) {
 	row := r.db.QueryRow(`SELECT t.id, t.name, t.slug, t.kind,
-		COUNT(DISTINCT CASE WHEN p.status = 'published' THEN p.id END), t.created_at, t.updated_at
+		COUNT(DISTINCT CASE WHEN p.status = 'published' AND p.published_at <= ? THEN p.id END), t.created_at, t.updated_at
 		FROM terms t LEFT JOIN post_terms pt ON pt.term_id = t.id LEFT JOIN posts p ON p.id = pt.post_id
-		WHERE t.id = ? GROUP BY t.id, t.name, t.slug, t.kind, t.created_at, t.updated_at`, id)
+		WHERE t.id = ? GROUP BY t.id, t.name, t.slug, t.kind, t.created_at, t.updated_at`, formatTime(time.Now().UTC()), id)
 	term, err := scanTerm(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Term{}, ErrNotFound
@@ -372,14 +482,16 @@ func (r *SQLiteRepository) DeleteTerm(id string) error {
 
 func (r *SQLiteRepository) ListTerms(query TermQuery) (TermPage, error) {
 	query.Page, query.PageSize = normalizePage(query.Page, query.PageSize)
+	now := formatTime(time.Now().UTC())
 	where := "1 = 1"
+	args := make([]any, 0, 3)
 	if !query.IncludeDrafts {
 		where = `EXISTS (
 			SELECT 1 FROM post_terms visible_pt JOIN posts visible_p ON visible_p.id = visible_pt.post_id
-			WHERE visible_pt.term_id = t.id AND visible_p.status = 'published'
+			WHERE visible_pt.term_id = t.id AND visible_p.status = 'published' AND visible_p.published_at <= ?
 		)`
+		args = append(args, now)
 	}
-	args := make([]any, 0, 2)
 	if strings.TrimSpace(query.Kind) != "" {
 		where += " AND t.kind = ?"
 		args = append(args, strings.TrimSpace(query.Kind))
@@ -393,11 +505,13 @@ func (r *SQLiteRepository) ListTerms(query TermQuery) (TermPage, error) {
 		return TermPage{}, fmt.Errorf("count terms: %w", err)
 	}
 	offset := (query.Page - 1) * query.PageSize
+	pageArgs := append([]any{now}, args...)
+	pageArgs = append(pageArgs, query.PageSize, offset)
 	rows, err := r.db.Query(`SELECT t.id, t.name, t.slug, t.kind,
-		COUNT(DISTINCT CASE WHEN p.status = 'published' THEN p.id END), t.created_at, t.updated_at
+		COUNT(DISTINCT CASE WHEN p.status = 'published' AND p.published_at <= ? THEN p.id END), t.created_at, t.updated_at
 		FROM terms t LEFT JOIN post_terms pt ON pt.term_id = t.id LEFT JOIN posts p ON p.id = pt.post_id
 		WHERE `+where+` GROUP BY t.id, t.name, t.slug, t.kind, t.created_at, t.updated_at
-		ORDER BY t.kind, t.name COLLATE NOCASE LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
+		ORDER BY t.kind, t.name COLLATE NOCASE LIMIT ? OFFSET ?`, pageArgs...)
 	if err != nil {
 		return TermPage{}, fmt.Errorf("list terms: %w", err)
 	}
@@ -447,7 +561,8 @@ func (r *SQLiteRepository) SearchPages(query PageQuery) (PagePage, error) {
 	where := "1 = 1"
 	args := make([]any, 0, 4)
 	if !query.IncludeDrafts {
-		where += " AND status = 'published'"
+		where += " AND status = 'published' AND published_at IS NOT NULL AND published_at != '' AND published_at <= ?"
+		args = append(args, formatTime(time.Now().UTC()))
 	}
 	if search := strings.TrimSpace(query.Search); search != "" {
 		ids, err := r.recordIDsMatching("page", search)
@@ -535,7 +650,7 @@ func (r *SQLiteRepository) SavePage(page Page) (Page, error) {
 		ON CONFLICT(id) DO UPDATE SET title = excluded.title, slug = excluded.slug, excerpt = excluded.excerpt,
 		content = excluded.content, status = excluded.status, published_at = excluded.published_at, updated_at = excluded.updated_at`,
 		page.ID, page.Title, page.Slug, page.Excerpt, page.Content, page.Status, publishedAt, formatTime(page.UpdatedAt)); err != nil {
-		return Page{}, fmt.Errorf("save page: %w", err)
+		return Page{}, wrapSQLiteWriteError("save page", err)
 	}
 	if err := replaceSearchTokens(tx, "page", page.ID, page.Title, page.Excerpt, page.Slug, page.Content); err != nil {
 		return Page{}, err

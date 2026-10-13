@@ -6,12 +6,15 @@ import (
 	"time"
 )
 
-var ErrNotFound = errors.New("record not found")
+var (
+	ErrNotFound = errors.New("record not found")
+	ErrConflict = errors.New("unique constraint conflict")
+)
 
 type Site struct {
 	Name                      string    `json:"name"`
 	URL                       string    `json:"url"`
-	AdminMail                 string    `json:"adminMail"`
+	AdminMail                 string    `json:"-"`
 	Timezone                  string    `json:"timezone"`
 	Description               string    `json:"description"`
 	Keywords                  string    `json:"keywords"`
@@ -26,7 +29,7 @@ type Site struct {
 type User struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`
-	PasswordHash string    `json:"passwordHash"`
+	PasswordHash string    `json:"-"`
 	Email        string    `json:"email"`
 	Role         string    `json:"role"`
 	Active       bool      `json:"active"`
@@ -38,21 +41,23 @@ type User struct {
 type Admin = User
 
 type Post struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Slug         string    `json:"slug"`
-	Excerpt      string    `json:"excerpt"`
-	Content      string    `json:"content"`
-	Status       string    `json:"status"`
-	AllowComment bool      `json:"allowComment"`
-	Categories   []Term    `json:"categories,omitempty"`
-	Tags         []Term    `json:"tags,omitempty"`
-	PublishedAt        time.Time `json:"publishedAt"`
-	UpdatedAt          time.Time `json:"updatedAt"`
-	PassphraseHash     string    `json:"-"`
-	SetPassphrase      bool      `json:"-"`
-	PassphrasePlain    string    `json:"-"`
-	RequestedPublishAt time.Time `json:"-"`
+	ID                 string            `json:"id"`
+	Title              string            `json:"title"`
+	Slug               string            `json:"slug"`
+	Excerpt            string            `json:"excerpt"`
+	Content            string            `json:"content"`
+	CustomFields       map[string]string `json:"customFields,omitempty"`
+	Status             string            `json:"status"`
+	AllowComment       bool              `json:"allowComment"`
+	Categories         []Term            `json:"categories,omitempty"`
+	Tags               []Term            `json:"tags,omitempty"`
+	PublishedAt        time.Time         `json:"publishedAt"`
+	UpdatedAt          time.Time         `json:"updatedAt"`
+	PassphraseHash     string            `json:"-"`
+	SetPassphrase      bool              `json:"-"`
+	PassphrasePlain    string            `json:"-"`
+	RequestedPublishAt time.Time         `json:"-"`
+	SetCustomFields    bool              `json:"-"`
 }
 
 type Page struct {
@@ -98,7 +103,7 @@ type Comment struct {
 	PostTitle   string    `json:"postTitle,omitempty"`
 	PostSlug    string    `json:"postSlug,omitempty"`
 	AuthorName  string    `json:"authorName"`
-	AuthorEmail string    `json:"authorEmail,omitempty"`
+	AuthorEmail string    `json:"-"`
 	AuthorURL   string    `json:"authorUrl,omitempty"`
 	Content     string    `json:"content"`
 	Status      string    `json:"status"`
@@ -111,7 +116,7 @@ type Media struct {
 	Filename    string    `json:"filename"`
 	ContentType string    `json:"contentType"`
 	Size        int64     `json:"size"`
-	StorageKey  string    `json:"storageKey"`
+	StorageKey  string    `json:"-"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
@@ -124,17 +129,19 @@ type PostStats struct {
 }
 
 type PostQuery struct {
-	Search        string
-	IncludeDrafts bool
-	TermKind      string
-	TermSlug      string
-	CategorySlug  string
-	TagSlug       string
-	Order         string
-	RestrictIDs   bool
-	IDs           []string
-	Page          int
-	PageSize      int
+	Search          string
+	IncludeDrafts   bool
+	IncludeContent  bool
+	Status          string
+	TermKind        string
+	TermSlug        string
+	CategorySlug    string
+	TagSlug         string
+	Order           string
+	PublishedFrom   time.Time
+	PublishedBefore time.Time
+	Page            int
+	PageSize        int
 }
 
 type MonthCount struct {
@@ -231,6 +238,7 @@ type Repository interface {
 	Posts() ([]Post, error)
 	SearchPosts(PostQuery) (PostPage, error)
 	ListPublishedMeta() ([]Post, error)
+	PublishedNeighbors(Post) (*Post, *Post, error)
 	Post(string) (Post, error)
 	PostBySlug(string) (Post, error)
 	SavePost(Post) (Post, error)
@@ -262,8 +270,9 @@ type Repository interface {
 	DeleteOtherUserSessions(string, string) error
 	PurgeSessions(time.Time) error
 	SaveOutboundMail(string, string, string) error
-	ListOutboundMail() ([]OutboundMail, error)
+	ListOutboundMail(int, int) (OutboundMailPage, error)
 	SavePasswordReset(string, string, time.Time) error
+	DeletePasswordReset(string) error
 	ConsumePasswordReset(string, time.Time) (string, error)
 	ListPostRevisions(string) ([]PostRevision, error)
 	PostRevision(string) (PostRevision, error)
@@ -272,12 +281,13 @@ type Repository interface {
 }
 
 type PostRevision struct {
-	ID        string    `json:"id"`
-	PostID    string    `json:"postId"`
-	Title     string    `json:"title"`
-	Excerpt   string    `json:"excerpt"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID           string            `json:"id"`
+	PostID       string            `json:"postId"`
+	Title        string            `json:"title"`
+	Excerpt      string            `json:"excerpt"`
+	Content      string            `json:"content"`
+	CustomFields map[string]string `json:"customFields,omitempty"`
+	CreatedAt    time.Time         `json:"createdAt"`
 }
 
 type OutboundMail struct {
@@ -286,6 +296,13 @@ type OutboundMail struct {
 	Subject   string    `json:"subject"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+type OutboundMailPage struct {
+	Items    []OutboundMail
+	Total    int
+	Page     int
+	PageSize int
 }
 
 type SQLiteRepository struct {

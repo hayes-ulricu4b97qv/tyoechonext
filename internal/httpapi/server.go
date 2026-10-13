@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,32 +27,43 @@ import (
 )
 
 const (
+	contentSecurityPolicy = "default-src 'self'; base-uri 'self'; object-src 'none'; " +
+		"form-action 'self'; frame-ancestors 'none'; script-src 'self'; " +
+		"style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; connect-src 'self'"
 	// maxJSONBody is large enough for one post or page document whose body
 	// is a single rune past the documented maximum. UTF-8 uses at most 4
 	// bytes per rune, and encoding/json may escape a rune as \uXXXX.
 	// The extra rune lets validation, rather than the transport limit,
 	// reject an over-long body. The remaining allowance covers the other
 	// documented fields and JSON framing.
-	maxFieldRunes = 200 + 120 + 500 + 20*60 + 20*60
-	maxJSONBody   = (service.MaxContentRunes+1)*6 + maxFieldRunes*4 + 16*1024
-	maxUploadSize = 10 << 20
-	cookieName    = "app_session"
-	csrfCookie    = "app_csrf"
-	csrfHeader    = "X-CSRF-Token"
+	maxFieldRunes       = 200 + 120 + 500 + 20*60 + 20*60
+	maxCustomFieldRunes = 20_000
+	maxJSONBody         = (service.MaxContentRunes+1)*6 + (maxFieldRunes+maxCustomFieldRunes)*6 + 16*1024
+	maxUploadSize       = 10 << 20
+	cookieName          = "app_session"
+	csrfCookie          = "app_csrf"
+	csrfHeader          = "X-CSRF-Token"
 )
 
-type Server struct {
-	repo          store.Repository
-	app           *service.Service
-	settings      config.Settings
-	logger        *slog.Logger
-	webDir        string
-	mediaRoot     string
-	loginFailures *service.HitCounter
-	commentHits   *service.HitCounter
+var scalarAPIQueryParameters = []string{
+	"action", "category", "includeDraft", "includePending", "kind", "month", "order", "page", "pageSize", "q", "resourceType", "status", "tag",
 }
 
-func NewServer(repo store.Repository, settings config.Settings, logger *slog.Logger) *Server {
+type Server struct {
+	repo           store.Repository
+	app            *service.Service
+	settings       config.Settings
+	logger         *slog.Logger
+	webDir         string
+	mediaRoot      string
+	trustedProxies []*net.IPNet
+	loginFailures  *service.HitCounter
+	commentHits    *service.HitCounter
+	forgotHits     *service.HitCounter
+	forgotAccounts *service.HitCounter
+}
+
+func NewServer(repo store.Repository, settings config.Settings, logger *slog.Logger, mailers ...service.Mailer) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -66,15 +79,22 @@ func NewServer(repo store.Repository, settings config.Settings, logger *slog.Log
 		}
 		mediaRoot = filepath.Join(dataDir, "uploads")
 	}
+	var mailer service.Mailer
+	if len(mailers) > 0 {
+		mailer = mailers[0]
+	}
 	return &Server{
-		repo:          repo,
-		app:           service.New(repo),
-		settings:      settings,
-		logger:        logger,
-		webDir:        webDir,
-		mediaRoot:     mediaRoot,
-		loginFailures: service.NewHitCounter(),
-		commentHits:   service.NewHitCounter(),
+		repo:           repo,
+		app:            service.New(repo, logger, mailer),
+		settings:       settings,
+		logger:         logger,
+		webDir:         webDir,
+		mediaRoot:      mediaRoot,
+		trustedProxies: parseTrustedProxyCIDRs(settings.TrustedProxyCIDRs, logger),
+		loginFailures:  service.NewHitCounter(),
+		commentHits:    service.NewHitCounter(),
+		forgotHits:     service.NewHitCounter(),
+		forgotAccounts: service.NewHitCounter(),
 	}
 }
 
@@ -130,15 +150,44 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/settings/users/{username}", s.updateUser)
 	mux.HandleFunc("DELETE /api/v1/settings/users/{username}", s.deleteUser)
 	mux.HandleFunc("GET /api/v1/audit", s.listAudit)
+	mux.HandleFunc("GET /api/v1/mail", s.listOutboundMail)
 	mux.HandleFunc("GET /api/v1/backup", s.backup)
-	mux.HandleFunc("/", s.frontend)
+	mux.HandleFunc("GET /", s.frontend)
 
-	return requestLog(s.routeGuard(mux), s.logger)
+	return requestLog(apiErrorEnvelope(s.routeGuard(mux)), s.logger)
 }
 
 func (s *Server) routeGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			values, err := url.ParseQuery(r.URL.RawQuery)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_request", "API 查询参数格式无效")
+				return
+			}
+			for _, key := range scalarAPIQueryParameters {
+				if len(values[key]) > 1 {
+					writeError(w, http.StatusUnprocessableEntity, "validation_error", fmt.Sprintf("查询参数 %s 只能指定一次", key))
+					return
+				}
+			}
+			for _, key := range []string{"includeDraft", "includePending"} {
+				if value, exists := values[key]; exists && value[0] != "true" && value[0] != "false" {
+					writeError(w, http.StatusUnprocessableEntity, "validation_error", fmt.Sprintf("查询参数 %s 必须为 true 或 false", key))
+					return
+				}
+			}
+		}
+		if isFrontendPath(r.URL.Path) && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "This page only supports GET and HEAD")
+			return
+		}
 		s.ensureCSRFCookie(w, r)
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/feed.xml" || r.URL.Path == "/sitemap.xml" || r.URL.Path == "/robots.txt" || r.URL.Path == "/api/v1/system/status" || r.URL.Path == "/api/v1/setup" || r.URL.Path == "/api/v1/auth/login" || strings.HasPrefix(r.URL.Path, "/assets/") || r.URL.Path == "/favicon.svg" {
 			next.ServeHTTP(w, r)
@@ -156,7 +205,7 @@ func (s *Server) routeGuard(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/setting", http.StatusTemporaryRedirect)
 			return
 		}
-		if r.URL.Path == "/" {
+		if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			http.Redirect(w, r, "/user", http.StatusTemporaryRedirect)
 			return
 		}
@@ -258,7 +307,7 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 	passphrase := r.Header.Get("X-Post-Passphrase")
 	items := make([]rssItem, 0)
 	for page := 1; ; page++ {
-		posts, err := s.app.ListPosts("", false, page, 100)
+		posts, err := s.app.ListPostsWithContent("", false, page, 100)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
 			return
@@ -409,23 +458,24 @@ func (s *Server) systemStatus(w http.ResponseWriter, _ *http.Request) {
 		"features":    []string{"content", "pages", "taxonomy", "comments", "discussion", "media", "users", "sessions", "settings", "feeds", "archive", "audit"},
 	}
 	if site != nil {
-		response["site"] = publicSite(site)
+		response["site"] = publicSiteSummary(site)
 		response["reading"] = publicReading(site)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
 
 type postRequest struct {
-	Title        string   `json:"title"`
-	Slug         string   `json:"slug"`
-	Excerpt      string   `json:"excerpt"`
-	Content      string   `json:"content"`
-	Status       string   `json:"status"`
-	AllowComment *bool    `json:"allowComment"`
-	Categories   []string `json:"categories"`
-	Tags         []string `json:"tags"`
-	PublishAt    *string  `json:"publishAt"`
-	Passphrase   *string  `json:"passphrase"`
+	Title        string             `json:"title"`
+	Slug         string             `json:"slug"`
+	Excerpt      string             `json:"excerpt"`
+	Content      string             `json:"content"`
+	Status       string             `json:"status"`
+	AllowComment *bool              `json:"allowComment"`
+	Categories   []string           `json:"categories"`
+	Tags         []string           `json:"tags"`
+	PublishAt    *string            `json:"publishAt"`
+	Passphrase   *string            `json:"passphrase"`
+	CustomFields *map[string]string `json:"customFields"`
 }
 
 func (input postRequest) post() (store.Post, error) {
@@ -437,6 +487,10 @@ func (input postRequest) post() (store.Post, error) {
 		Status:     input.Status,
 		Categories: termInputs(input.Categories, "category"),
 		Tags:       termInputs(input.Tags, "tag"),
+	}
+	if input.CustomFields != nil {
+		post.CustomFields = *input.CustomFields
+		post.SetCustomFields = true
 	}
 	if input.PublishAt != nil && strings.TrimSpace(*input.PublishAt) != "" {
 		raw := strings.TrimSpace(*input.PublishAt)
@@ -632,6 +686,9 @@ func serviceError(err error) (int, string) {
 	if errors.Is(err, store.ErrNotFound) {
 		return http.StatusNotFound, "not_found"
 	}
+	if errors.Is(err, store.ErrConflict) {
+		return http.StatusConflict, "conflict"
+	}
 	return http.StatusInternalServerError, "save_failed"
 }
 
@@ -662,9 +719,11 @@ func (s *Server) pages(w http.ResponseWriter, r *http.Request) (int, int, bool) 
 func pagination(r *http.Request) (int, int, error) {
 	page := 1
 	if raw := strings.TrimSpace(r.URL.Query().Get("page")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-			page = parsed
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			return 0, 0, fmt.Errorf("%w: page 必须是正整数", service.ErrValidation)
 		}
+		page = parsed
 	}
 	pageSize := 20
 	if raw := strings.TrimSpace(r.URL.Query().Get("pageSize")); raw != "" {
@@ -673,6 +732,10 @@ func pagination(r *http.Request) (int, int, error) {
 			return 0, 0, fmt.Errorf("%w: pageSize 必须是 1 到 100 的整数", service.ErrValidation)
 		}
 		pageSize = parsed
+	}
+	maxInt := int(^uint(0) >> 1)
+	if page > 1 && page-1 > maxInt/pageSize {
+		return 0, 0, fmt.Errorf("%w: page 与 pageSize 组合后的偏移量超出范围", service.ErrValidation)
 	}
 	return page, pageSize, nil
 }
@@ -692,6 +755,16 @@ func publicSite(site *store.Site) map[string]string {
 		"name":        site.Name,
 		"url":         site.URL,
 		"adminMail":   site.AdminMail,
+		"timezone":    site.Timezone,
+		"description": site.Description,
+		"keywords":    site.Keywords,
+	}
+}
+
+func publicSiteSummary(site *store.Site) map[string]string {
+	return map[string]string{
+		"name":        site.Name,
+		"url":         site.URL,
 		"timezone":    site.Timezone,
 		"description": site.Description,
 		"keywords":    site.Keywords,
@@ -734,6 +807,7 @@ type postResponse struct {
 	Slug         string                `json:"slug"`
 	Excerpt      string                `json:"excerpt"`
 	Content      *string               `json:"content,omitempty"`
+	CustomFields map[string]string     `json:"customFields,omitempty"`
 	Locked       bool                  `json:"locked,omitempty"`
 	Status       string                `json:"status"`
 	AllowComment bool                  `json:"allowComment"`
@@ -825,6 +899,7 @@ func publicPost(post store.Post, withBody bool) postResponse {
 	if withBody {
 		content := post.Content
 		response.Content = &content
+		response.CustomFields = post.CustomFields
 	}
 	response.Categories = publicTerms(post.Categories)
 	response.Tags = publicTerms(post.Tags)
@@ -1006,7 +1081,12 @@ func newMediaID() string {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
-	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+	contentTypes := r.Header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		return errors.New("Content-Type must be application/json")
+	}
+	mediaType, _, err := mime.ParseMediaType(contentTypes[0])
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
 		return errors.New("Content-Type must be application/json")
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBody))
@@ -1022,6 +1102,15 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	return nil
+}
+
+func writeJSONDecodeError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds the supported size limit")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -1044,7 +1133,7 @@ func writeXML(w http.ResponseWriter, status int, contentType string, value any) 
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": localize(message)}})
+	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": localizedError(code, message)}})
 }
 
 type statusWriter struct {

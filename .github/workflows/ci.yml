@@ -1,5 +1,8 @@
 name: ci
 
+permissions:
+  contents: read
+
 on:
   push:
   pull_request:
@@ -7,17 +10,24 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    timeout-minutes: 30
     env:
       CGO_ENABLED: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.27.2"
       - name: Go tests
         run: go test ./...
+      - name: Go race tests for HTTP and rate limiting
+        run: go test -race ./internal/service ./internal/httpapi
       - name: Go vet
         run: go vet ./...
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -26,6 +36,9 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: npm ci
+      - name: Audit web dependencies
+        working-directory: web
+        run: npm audit --audit-level=high
       - name: Windows end-to-end tests and native build
         working-directory: web
         run: npm run test:e2e

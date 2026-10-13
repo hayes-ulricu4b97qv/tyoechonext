@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -85,17 +86,17 @@ func TestPublishedOrderDraftsFeedAndRobots(t *testing.T) {
 		t.Fatalf("editor preview = %#v", preview)
 	}
 
-	for index := 0; index < 21; index++ {
+	for index := 0; index < 101; index++ {
 		when := time.Now().UTC().Add(-time.Duration(index+3) * time.Hour)
 		if _, err := repo.SavePost(store.Post{
-			Title: "批量", Slug: "bulk-" + time.Duration(index).String(), Content: "批量正文", Status: "published", PublishedAt: when, AllowComment: true,
+			Title: "批量", Slug: fmt.Sprintf("bulk-%03d", index), Content: "批量正文", Status: "published", PublishedAt: when, AllowComment: true,
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	feed, _ := readFeed(t, public, server.URL+"/feed.xml")
-	if len(feed.Channel.Items) < 23 {
-		t.Fatalf("feed items = %d, want every published post", len(feed.Channel.Items))
+	if len(feed.Channel.Items) != 103 {
+		t.Fatalf("feed items = %d, want all 103 published posts across pages", len(feed.Channel.Items))
 	}
 	if feed.Channel.Items[0].Title != "较晚" {
 		t.Fatalf("feed order starts with %q", feed.Channel.Items[0].Title)
@@ -122,8 +123,16 @@ func TestPublishedOrderDraftsFeedAndRobots(t *testing.T) {
 	if !strings.Contains(robots, "Allow: /") || !strings.Contains(robots, "Disallow: /admin") || !strings.Contains(robots, "Disallow: /setting") || !strings.Contains(robots, "Sitemap: https://example.com/sitemap.xml") {
 		t.Fatalf("robots = %s", robots)
 	}
-	if robotsResp.Header.Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatal("missing nosniff")
+	for header, want := range map[string]string{
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": contentSecurityPolicy,
+		"Referrer-Policy":         "strict-origin-when-cross-origin",
+		"Permissions-Policy":      "camera=(), microphone=(), geolocation=()",
+	} {
+		if got := robotsResp.Header.Get(header); got != want {
+			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
 	}
 
 	tooBig := getStatus(t, public, server.URL+"/api/v1/content/posts?pageSize=101", http.StatusUnprocessableEntity)
@@ -158,10 +167,6 @@ func TestLoginLimitSessionLogAndChineseErrors(t *testing.T) {
 		if wrong["error"].(map[string]any)["code"] != "invalid_credentials" || !containsHan(wrong["error"].(map[string]any)["message"].(string)) {
 			t.Fatalf("wrong password = %#v", wrong)
 		}
-	}
-	limited := postJSON(t, owner, server.URL+"/api/v1/auth/login", map[string]string{"username": "owner", "password": "wrong-pass"}, http.StatusTooManyRequests)
-	if limited["error"].(map[string]any)["code"] != "rate_limited" {
-		t.Fatalf("rate limit = %#v", limited)
 	}
 	response := sendRaw(t, owner, http.MethodPost, server.URL+"/api/v1/auth/login", map[string]string{"username": "owner", "password": "password1"}, http.StatusOK)
 	defer response.Body.Close()
@@ -199,7 +204,7 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 	if err := os.MkdirAll(webDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte("<!doctype html><html><head><title>Typecho Next</title></head><body><div id=\"app\"></div></body></html>"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte(`<!doctype html><html><head><title>Typecho Next</title><meta name="description" content="{{META_DESCRIPTION}}"><meta name="keywords" content="{{META_KEYWORDS}}"><meta name="robots" content="{{ROBOTS_CONTENT}}"><meta property="og:type" content="{{OG_TYPE}}"><meta property="og:title" content="{{OG_TITLE}}"><meta property="og:description" content="{{OG_DESCRIPTION}}"><meta property="og:site_name" content="{{OG_SITE_NAME}}"><meta property="og:url" content="{{OG_URL}}"><link rel="canonical" href="{{CANONICAL_URL}}"></head><body><div id="app"></div></body></html>`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("APP_WEB_DIR", webDir)
@@ -218,6 +223,7 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 	setupSite(t, owner, server.URL, "UTC")
 	putJSON(t, owner, server.URL+"/api/v1/settings/site", map[string]string{
 		"name": "海岸", "url": "https://example.com", "adminMail": "owner@example.com", "timezone": "UTC",
+		"description": "海岸 & <笔记>", "keywords": "Go,博客 & Markdown",
 	}, http.StatusOK)
 
 	futureAt := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
@@ -238,13 +244,20 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 	if slugs(get(t, public, server.URL+"/api/v1/content/posts"))["tomorrow"] {
 		t.Fatal("future post is on the public list")
 	}
+	futureHTMLStatus, futureHTML := getShellResponse(t, public, server.URL+"/user/tomorrow")
+	if futureHTMLStatus != http.StatusNotFound {
+		t.Fatalf("future post shell status = %d, want 404", futureHTMLStatus)
+	}
+	if strings.Contains(futureHTML, "还没到点") {
+		t.Fatal("future post body leaked into the anonymous HTML shell")
+	}
 	if future["publishedAt"] == nil || !strings.HasPrefix(future["publishedAt"].(string), futureAt.Format("2006-01-02T15:04:05")) {
 		t.Fatalf("future publishedAt = %#v", future["publishedAt"])
 	}
 
 	originalAt := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
 	original := postJSON(t, owner, server.URL+"/api/v1/content/posts", map[string]any{
-		"title": "初稿", "slug": "stable-time", "content": "第一版", "status": "published",
+		"title": "初稿", "slug": "stable-time", "content": "第一版", "status": "published", "customFields": map[string]string{"edition": "第一版字段"},
 		"publishAt": originalAt.Format(time.RFC3339),
 	}, http.StatusCreated)
 	putJSON(t, owner, server.URL+"/api/v1/content/posts/"+original["id"].(string), map[string]any{
@@ -257,38 +270,95 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 	if republished["publishedAt"] != original["publishedAt"] {
 		t.Fatalf("republish changed publishedAt from %v to %v", original["publishedAt"], republished["publishedAt"])
 	}
+	if republished["customFields"].(map[string]any)["edition"] != "第一版字段" {
+		t.Fatalf("an update without customFields cleared the existing values: %#v", republished)
+	}
 	revisions := get(t, owner, server.URL+"/api/v1/content/posts/"+original["id"].(string)+"/revisions")
 	revItems := revisions["items"].([]any)
 	if len(revItems) == 0 || revItems[0].(map[string]any)["content"] != "第一版" {
 		t.Fatalf("revisions = %#v", revItems)
 	}
+	if revItems[0].(map[string]any)["customFields"].(map[string]any)["edition"] != "第一版字段" {
+		t.Fatalf("revision did not preserve custom fields: %#v", revItems[0])
+	}
 	restored := postJSON(t, owner, server.URL+"/api/v1/content/posts/"+original["id"].(string)+"/revisions/"+revItems[0].(map[string]any)["id"].(string)+"/restore", map[string]any{}, http.StatusOK)
-	if restored["content"] != "第一版" {
+	if restored["content"] != "第一版" || restored["customFields"].(map[string]any)["edition"] != "第一版字段" {
 		t.Fatalf("restored = %#v", restored["content"])
+	}
+	retained := get(t, owner, server.URL+"/api/v1/content/posts/stable-time")
+	if retained["customFields"].(map[string]any)["edition"] != "第一版字段" {
+		t.Fatalf("an update without customFields cleared the existing values: %#v", retained)
+	}
+	cleared := putJSON(t, owner, server.URL+"/api/v1/content/posts/"+original["id"].(string), map[string]any{
+		"title": "初稿", "slug": "stable-time", "content": "第一版", "status": "published", "customFields": map[string]string{},
+	}, http.StatusOK)
+	if _, ok := cleared["customFields"]; ok {
+		t.Fatalf("an explicit empty customFields object did not clear fields: %#v", cleared["customFields"])
+	}
+	publicList := get(t, public, server.URL+"/api/v1/content/posts?q="+urlQuery("初稿"))
+	for _, item := range publicList["items"].([]any) {
+		if _, ok := item.(map[string]any)["customFields"]; ok {
+			t.Fatal("post list returned custom fields")
+		}
+	}
+	invalidCustomFields := []map[string]any{
+		{"title": "重复字段", "slug": "duplicate-fields", "content": "Body", "status": "draft", "customFields": map[string]string{"field": "one", " field ": "two"}},
+		{"title": "字段名过长", "slug": "long-custom-key", "content": "Body", "status": "draft", "customFields": map[string]string{strings.Repeat("k", 81): "value"}},
+		{"title": "字段过长", "slug": "long-custom-field", "content": "Body", "status": "draft", "customFields": map[string]string{"field": strings.Repeat("值", 2001)}},
+		{"title": "字段数过多", "slug": "too-many-fields", "content": "Body", "status": "draft", "customFields": func() map[string]string {
+			fields := make(map[string]string, 51)
+			for index := 0; index < 51; index++ {
+				fields[fmt.Sprintf("field-%02d", index)] = "value"
+			}
+			return fields
+		}()},
+		{"title": "字段总量过大", "slug": "too-many-field-runes", "content": "Body", "status": "draft", "customFields": func() map[string]string {
+			fields := make(map[string]string, 11)
+			for index := 0; index < 11; index++ {
+				fields[fmt.Sprintf("field-%02d", index)] = strings.Repeat("v", 1900)
+			}
+			return fields
+		}()},
+	}
+	for _, payload := range invalidCustomFields {
+		response := postJSON(t, owner, server.URL+"/api/v1/content/posts", payload, http.StatusUnprocessableEntity)
+		if response["error"].(map[string]any)["code"] != "validation_error" {
+			t.Fatalf("invalid custom fields were not rejected: %#v", response)
+		}
 	}
 
 	locked := postJSON(t, owner, server.URL+"/api/v1/content/posts", map[string]any{
-		"title": "口令", "slug": "locked-post", "content": "只有口令能看", "status": "published", "passphrase": "secret-pass",
+		"title": "口令", "slug": "locked-post", "content": "只有口令能看", "status": "published", "passphrase": "secret-pass", "customFields": map[string]string{"secret": "隐藏字段"},
 	}, http.StatusCreated)
 	if locked["content"] != "只有口令能看" {
 		t.Fatalf("author create hid the body: %#v", locked["content"])
 	}
 	lockedList := get(t, public, server.URL+"/api/v1/content/posts?q="+urlQuery("口令"))
 	for _, item := range lockedList["items"].([]any) {
-		if _, ok := item.(map[string]any)["content"]; ok {
+		post := item.(map[string]any)
+		if _, ok := post["content"]; ok {
 			t.Fatal("locked list item included a body")
+		}
+		if _, ok := post["customFields"]; ok {
+			t.Fatal("locked list item included custom fields")
 		}
 	}
 	denied := get(t, public, server.URL+"/api/v1/content/posts/locked-post")
 	if _, ok := denied["content"]; ok || denied["locked"] != true {
 		t.Fatalf("locked detail = %#v", denied)
 	}
+	if _, ok := denied["customFields"]; ok {
+		t.Fatalf("locked detail returned custom fields: %#v", denied)
+	}
 	wrong := getWithHeader(t, server.URL+"/api/v1/content/posts/locked-post", "X-Post-Passphrase", "nope")
 	if _, ok := wrong["content"]; ok {
 		t.Fatal("wrong passphrase returned the body")
 	}
+	if _, ok := wrong["customFields"]; ok {
+		t.Fatal("wrong passphrase returned custom fields")
+	}
 	opened := getWithHeader(t, server.URL+"/api/v1/content/posts/locked-post", "X-Post-Passphrase", "secret-pass")
-	if opened["content"] != "只有口令能看" {
+	if opened["content"] != "只有口令能看" || opened["customFields"].(map[string]any)["secret"] != "隐藏字段" {
 		t.Fatalf("unlocked = %#v", opened["content"])
 	}
 	anonymousFeed := getText(t, public, server.URL+"/feed.xml")
@@ -325,12 +395,12 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 			t.Fatal("rate limited comment was stored on the public list")
 		}
 	}
-	mail, err := repo.ListOutboundMail()
+	mailPage, err := repo.ListOutboundMail(1, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasMail(mail, "owner@example.com", "新评论待审核", "第一条正常评论") {
-		t.Fatalf("comment mail = %#v", mail)
+	if !hasMail(mailPage.Items, "owner@example.com", "新评论待审核", "第一条正常评论") {
+		t.Fatalf("comment mail = %#v", mailPage.Items)
 	}
 
 	putJSON(t, owner, server.URL+"/api/v1/settings/reading", map[string]any{
@@ -356,18 +426,6 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 	if approved["status"] != "approved" {
 		t.Fatalf("approved comment = %#v", approved)
 	}
-
-	before := len(mustMail(t, repo))
-	postJSON(t, owner, server.URL+"/api/v1/auth/forgot", map[string]string{"username": "missing-user"}, http.StatusAccepted)
-	if len(mustMail(t, repo)) != before {
-		t.Fatal("missing user sent reset mail")
-	}
-	postJSON(t, owner, server.URL+"/api/v1/auth/forgot", map[string]string{"username": "owner"}, http.StatusAccepted)
-	resetMail := latestMail(t, repo, "重置密码")
-	token := resetToken(resetMail.Body)
-	postJSON(t, owner, server.URL+"/api/v1/auth/reset", map[string]string{"token": token, "password": "password2"}, http.StatusOK)
-	postJSON(t, owner, server.URL+"/api/v1/auth/login", map[string]string{"username": "owner", "password": "password1"}, http.StatusUnauthorized)
-	postJSON(t, owner, server.URL+"/api/v1/auth/login", map[string]string{"username": "owner", "password": "password2"}, http.StatusOK)
 
 	upload := uploadGIF(t, owner, server.URL)
 	if !strings.HasPrefix(upload["url"].(string), "/media/") {
@@ -419,17 +477,104 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 	if !strings.Contains(postHTML, "初稿") || !strings.Contains(postHTML, "第一版") || strings.Contains(postHTML, "<title>Typecho Next</title>") {
 		t.Fatalf("post html = %s", postHTML)
 	}
+	for _, expected := range []string{
+		`<meta name="description" content="海岸 &amp; &lt;笔记&gt;">`,
+		`<meta name="keywords" content="Go,博客 &amp; Markdown">`,
+		`<meta property="og:title" content="初稿 - 海岸">`,
+		`<meta property="og:type" content="article">`,
+		`<link rel="canonical" href="https://example.com/user/stable-time">`,
+	} {
+		if !strings.Contains(postHTML, expected) {
+			t.Fatalf("post metadata missing %q: %s", expected, postHTML)
+		}
+	}
 	pageHTML := getText(t, public, server.URL+"/page/"+page["slug"].(string))
-	if !strings.Contains(pageHTML, "关于海岸") || !strings.Contains(pageHTML, "页面正文甲") {
+	if !strings.Contains(pageHTML, "关于海岸") || !strings.Contains(pageHTML, "页面正文甲") || !strings.Contains(pageHTML, `<meta property="og:type" content="article">`) {
 		t.Fatalf("page html = %s", pageHTML)
 	}
 	homeHTML := getText(t, public, server.URL+"/user")
-	if !strings.Contains(homeHTML, "海岸") || strings.Contains(homeHTML, "<title>Typecho Next</title>") {
+	if !strings.Contains(homeHTML, "海岸") || strings.Contains(homeHTML, "<title>Typecho Next</title>") || !strings.Contains(homeHTML, `<meta property="og:type" content="website">`) {
 		t.Fatalf("home html = %s", homeHTML)
+	}
+	adminHTML := getText(t, owner, server.URL+"/admin")
+	if !strings.Contains(adminHTML, `<meta name="robots" content="noindex, nofollow">`) {
+		t.Fatalf("admin shell is indexable: %s", adminHTML)
+	}
+	previewHTML := getText(t, owner, server.URL+"/user/stable-time?preview=true")
+	if !strings.Contains(previewHTML, `<meta name="robots" content="noindex, nofollow">`) {
+		t.Fatalf("preview shell is indexable: %s", previewHTML)
 	}
 	lockedHTML := getText(t, public, server.URL+"/user/locked-post")
 	if strings.Contains(lockedHTML, "只有口令能看") {
 		t.Fatal("locked html included the body")
+	}
+}
+
+func TestPublicShellRendersSafeMarkdownWithoutJavaScript(t *testing.T) {
+	webDir := t.TempDir()
+	index := `<!doctype html><html><head><title>Typecho Next</title><meta name="description" content="{{META_DESCRIPTION}}"><meta name="keywords" content="{{META_KEYWORDS}}"><meta name="robots" content="{{ROBOTS_CONTENT}}"><meta property="og:type" content="{{OG_TYPE}}"><meta property="og:title" content="{{OG_TITLE}}"><meta property="og:description" content="{{OG_DESCRIPTION}}"><meta property="og:site_name" content="{{OG_SITE_NAME}}"><meta property="og:url" content="{{OG_URL}}"><link rel="canonical" href="{{CANONICAL_URL}}"></head><body><div id="app"></div></body></html>`
+	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte(index), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APP_WEB_DIR", webDir)
+	_, server, owner := newAPIServer(t)
+	setupSite(t, owner, server.URL, "UTC")
+
+	markdown := "## Server Markdown\n\n**bold** and [safe](https://example.com)\n\n![diagram](/media/example.png)\n\n[unsafe](javascript:alert%281%29) [entity-unsafe](java&#x73;cript:alert%284%29) [data-unsafe](data:text/html,alert%285%29)\n\n<script>alert(2)</script>\n<img src=x onerror=alert(3)>"
+	postJSON(t, owner, server.URL+"/api/v1/content/posts", map[string]any{
+		"title": "Rendered", "slug": "server-markdown", "content": markdown, "status": "published",
+	}, http.StatusCreated)
+	document := getText(t, &http.Client{}, server.URL+"/user/server-markdown")
+	postJSON(t, owner, server.URL+"/api/v1/content/pages", map[string]any{
+		"title": "Page Markdown", "slug": "page-markdown", "content": markdown, "status": "published",
+	}, http.StatusCreated)
+	pageDocument := getText(t, &http.Client{}, server.URL+"/page/page-markdown")
+	for _, expected := range []string{
+		"<h2>Server Markdown</h2>",
+		"<strong>bold</strong>",
+		`<a href="https://example.com">safe</a>`,
+		`<img src="/media/example.png" alt="diagram">`,
+	} {
+		if !strings.Contains(document, expected) {
+			t.Errorf("server-rendered document is missing %q: %s", expected, document)
+		}
+	}
+	if !strings.Contains(pageDocument, "<h2>Server Markdown</h2>") || !strings.Contains(pageDocument, "<strong>bold</strong>") {
+		t.Fatalf("page shell did not render Markdown: %s", pageDocument)
+	}
+	lowerDocument := strings.ToLower(document)
+	for _, unsafe := range []string{"<script", "onerror=", "javascript:", "data:text/html", "alert(2)", "alert(3)", "alert(4)", "alert(5)"} {
+		if strings.Contains(lowerDocument, unsafe) {
+			t.Errorf("server-rendered document contains unsafe content %q: %s", unsafe, document)
+		}
+	}
+	var requests sync.WaitGroup
+	requestErrors := make(chan error, 16)
+	client := &http.Client{Timeout: 5 * time.Second}
+	for range 16 {
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			response, err := client.Get(server.URL + "/user/server-markdown")
+			if err != nil {
+				requestErrors <- err
+				return
+			}
+			defer response.Body.Close()
+			payload, err := io.ReadAll(response.Body)
+			if err != nil {
+				requestErrors <- err
+				return
+			}
+			if response.StatusCode != http.StatusOK || !bytes.Contains(payload, []byte("<h2>Server Markdown</h2>")) {
+				requestErrors <- fmt.Errorf("concurrent page response status=%d body=%s", response.StatusCode, payload)
+			}
+		}()
+	}
+	requests.Wait()
+	close(requestErrors)
+	for err := range requestErrors {
+		t.Error(err)
 	}
 }
 
@@ -605,15 +750,6 @@ func getText(t *testing.T, client *http.Client, url string) string {
 	return string(payload)
 }
 
-func mustMail(t *testing.T, repo *store.SQLiteRepository) []store.OutboundMail {
-	t.Helper()
-	mail, err := repo.ListOutboundMail()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return mail
-}
-
 func hasMail(mail []store.OutboundMail, recipient, subject, bodyPart string) bool {
 	for _, item := range mail {
 		if item.Recipient == recipient && item.Subject == subject && strings.Contains(item.Body, bodyPart) {
@@ -621,20 +757,6 @@ func hasMail(mail []store.OutboundMail, recipient, subject, bodyPart string) boo
 		}
 	}
 	return false
-}
-
-func latestMail(t *testing.T, repo *store.SQLiteRepository, subject string) store.OutboundMail {
-	t.Helper()
-	var found store.OutboundMail
-	for _, item := range mustMail(t, repo) {
-		if item.Subject == subject {
-			found = item
-		}
-	}
-	if found.ID == "" {
-		t.Fatalf("missing mail %s", subject)
-	}
-	return found
 }
 
 func resetToken(body string) string {

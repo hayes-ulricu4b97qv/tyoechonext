@@ -1,5 +1,5 @@
 import { api, postJSON } from '../api'
-import type { Status, User } from '../types'
+import type { OutboundMailPage, Status, User } from '../types'
 
 export interface SetupInput {
   siteName: string
@@ -29,6 +29,10 @@ export function login(input: LoginInput) {
 
 export function logout() {
   return api<void>('/api/v1/auth/logout', { method: 'POST' })
+}
+
+export function listOutboundMail(page = 1, pageSize = 20) {
+	return api<OutboundMailPage>(`/api/v1/mail?page=${page}&pageSize=${pageSize}`)
 }
 
 export function forgotPassword(username: string) {

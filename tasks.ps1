@@ -41,12 +41,30 @@ try {
             Invoke-CommandChecked 'go' @('build', '-o', './bin/typecho-next.exe', './cmd/server')
         }
         'clean' {
+            $cleanupTargets = @()
             foreach ($relativePath in @('web/dist', 'bin')) {
                 $targetPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $relativePath))
                 $workspacePrefix = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\') + '\'
                 if (-not $targetPath.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
                     throw "Cleanup target is outside the project: $targetPath"
                 }
+                if (Test-Path -LiteralPath $targetPath) {
+                    $targetItem = Get-Item -LiteralPath $targetPath -Force
+                    if (($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Cleanup target is a link and will not be followed: $targetPath"
+                    }
+                    if ($targetItem.PSIsContainer) {
+                        $nestedLink = Get-ChildItem -LiteralPath $targetPath -Force -Recurse |
+                            Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
+                            Select-Object -First 1
+                        if ($null -ne $nestedLink) {
+                            throw "Cleanup target contains a link and will not be followed: $($nestedLink.FullName)"
+                        }
+                    }
+                }
+                $cleanupTargets += $targetPath
+            }
+            foreach ($targetPath in $cleanupTargets) {
                 if (Test-Path -LiteralPath $targetPath) {
                     Remove-Item -LiteralPath $targetPath -Recurse -Force
                 }

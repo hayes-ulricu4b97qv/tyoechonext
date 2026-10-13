@@ -179,6 +179,7 @@ async function writePost(title,slug,content,status='published') {
   if (process.env.E2E_ONLY === 'visual') return;
   await step('settings navigation, saved state, leave warning and mobile layout',async()=>{
     await page.goto(base+'/setting');const save=page.getByRole('button',{name:'保存设置',exact:true});await save.waitFor();assert.ok(await save.isDisabled());
+    assert.equal(await page.getByLabel('管理员邮箱',{exact:true}).inputValue(),'owner@example.com','owner settings must load the private site email through the owner-only endpoint');
     await page.getByLabel('站点描述',{exact:true}).fill('E2E 站点介绍');assert.ok(await save.isEnabled());await page.locator('#site').getByText('有未保存的修改',{exact:true}).waitFor();
     await page.locator('.settings-index').getByRole('link',{name:'阅读与评论',exact:true}).click();assert.equal(await page.getByLabel('站点描述',{exact:true}).inputValue(),'E2E 站点介绍');
     await page.locator('.settings-index').getByRole('link',{name:'站点信息',exact:true}).click();await save.click();await page.getByText('设置已保存',{exact:true}).waitFor();assert.ok(await save.isDisabled());
@@ -199,6 +200,24 @@ async function writePost(title,slug,content,status='published') {
     await reader.goto(base+'/user/e2e-public');await reader.getByRole('heading',{name:'正文标题',exact:true}).waitFor();
     assert.equal(await reader.evaluate(()=>window.e2eXss),undefined);
     assert.equal(await reader.locator('.article-body [onerror], .article-body script').count(),0);
+  });
+  await step('custom fields save, render as text, edit and restore with revisions',async()=>{
+    const injected='<img src=x onerror="window.e2eXss=true">';
+    await api(owner,'POST','/api/v1/content/posts',{title:'E2E 自定义字段',slug:'e2e-custom-fields',content:'Fields body',status:'published',customFields:{caption:'Original caption',markup:injected}},201);
+    const list=await api(publicCtx,'GET','/api/v1/content/posts?q='+encodeURIComponent('E2E 自定义字段'));
+    const summary=list.items.find(post=>post.slug==='e2e-custom-fields');assert.ok(summary);assert.equal('customFields' in summary,false);
+    await reader.goto(base+'/user/e2e-custom-fields');
+    const renderedFields=reader.locator('.post-custom-fields');await renderedFields.getByText('Original caption',{exact:true}).waitFor();
+    assert.ok((await renderedFields.innerText()).includes(injected));assert.equal(await renderedFields.locator('img').count(),0);assert.equal(await reader.evaluate(()=>window.e2eXss),undefined);
+    await page.goto(base+'/admin');await postRow('E2E 自定义字段').getByRole('button',{name:'编辑',exact:true}).click();
+    const rows=page.locator('#post-editor .custom-field-row');await rows.nth(0).locator('textarea').fill('Updated caption');
+    await page.getByRole('button',{name:'添加字段',exact:true}).click();await rows.nth(2).locator('input').fill('second');await rows.nth(2).locator('textarea').fill('Added value');
+    await page.getByRole('button',{name:'保存修改',exact:true}).click();await postRow('E2E 自定义字段').waitFor();
+    let detail=await api(publicCtx,'GET','/api/v1/content/posts/e2e-custom-fields');assert.equal(detail.customFields.caption,'Updated caption');assert.equal(detail.customFields.second,'Added value');
+    await postRow('E2E 自定义字段').getByRole('button',{name:'编辑',exact:true}).click();
+    await page.getByRole('button',{name:'恢复此版本',exact:true}).first().click();
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('#post-editor .custom-field-row textarea')).some(field=>field.value==='Original caption'));
+    detail=await api(publicCtx,'GET','/api/v1/content/posts/e2e-custom-fields');assert.equal(detail.customFields.caption,'Original caption');assert.equal(detail.customFields.second,undefined);
   });
   await step('draft privacy and authorized preview',async()=>{
     await writePost('E2E 草稿','e2e-draft','Private draft','draft');
@@ -225,7 +244,11 @@ async function writePost(title,slug,content,status='published') {
     await page.getByPlaceholder('页面内容，支持 Markdown…').fill('About version one');
     await page.locator('#pages select').selectOption('published');await page.getByRole('button',{name:'保存页面',exact:true}).click();
     const row=page.locator('#pages .admin-post-row').filter({hasText:'E2E 关于'});await row.waitFor();
+    await reader.goto(base+'/user');await reader.locator('.site-nav > a[href="/user"].active').waitFor();
     await reader.goto(base+'/page/e2e-about');await reader.locator('.article-body').filter({hasText:'About version one'}).waitFor();
+    const activePageLink=reader.locator('.site-pages-panel a[href="/page/e2e-about"]');await activePageLink.waitFor({state:'attached'});
+    assert.ok(await activePageLink.evaluate(el=>el.classList.contains('active')),'current page should be active in reader navigation');
+    assert.equal(await reader.locator('.site-nav > a[href="/user"]').evaluate(el=>el.classList.contains('active')),false,'article navigation should not stay active on a page');
     await row.getByRole('button',{name:'编辑',exact:true}).click();await page.getByPlaceholder('页面内容，支持 Markdown…').fill('About version two');
     await page.locator('#pages').getByRole('button',{name:'保存修改',exact:true}).click();
     await reader.reload();await reader.locator('.article-body').filter({hasText:'About version two'}).waitFor();
@@ -239,34 +262,117 @@ async function writePost(title,slug,content,status='published') {
     await editing.locator('input').fill('E2E 新分类');await editing.getByRole('button',{name:'保存',exact:true}).click();
     await page.locator('.taxonomy-row').getByText('E2E 新分类',{exact:true}).waitFor();
     assert.equal((await api(publicCtx,'GET','/api/v1/content/posts/e2e-public')).categories[0].name,'E2E 新分类');
-    await reader.goto(base+'/user');await reader.locator('.term-filter-bar').getByRole('link').filter({hasText:'E2E 新分类'}).click();
+    await reader.goto(base+'/user');const categoryMenu=reader.locator('.term-filter-bar details.term-group').filter({hasText:'分类'});await categoryMenu.locator('summary').click();await categoryMenu.getByRole('link').filter({hasText:'E2E 新分类'}).click();
     await reader.locator('.post-card').filter({hasText:'E2E 公开文章'}).waitFor();assert.ok(reader.url().includes('category='));
+  });
+  await step('reader navigation and taxonomy load beyond the first API page',async()=>{
+    for(let i=0;i<101;i++){
+      const suffix=String(i).padStart(3,'0');
+      await api(owner,'POST','/api/v1/content/pages',{title:'E2E 导航页 '+suffix,slug:'e2e-nav-'+suffix,content:'Navigation fixture',status:'published'},201);
+      await api(owner,'POST','/api/v1/content/posts',{title:'E2E Filter fixture '+suffix,slug:'e2e-filter-'+suffix,content:'Filter fixture',status:'published',categories:['E2E filter '+suffix]},201);
+    }
+    const pageTail=(await api(publicCtx,'GET','/api/v1/content/pages?page=6&pageSize=20')).items[0];assert.ok(pageTail,'fixture should reach a sixth page');
+    const termTail=(await api(publicCtx,'GET','/api/v1/content/terms?kind=category&page=2&pageSize=24')).items[0];assert.ok(termTail,'fixture should reach a second category page');
+    await reader.goto(base+'/user');
+    const pagesMenu=reader.locator('.site-pages');await pagesMenu.locator('summary').click();
+    const pageLinks=pagesMenu.locator('.site-pages-panel a');await pageLinks.nth(19).waitFor();
+    assert.equal(await pageLinks.count(),20,'initial page navigation should stay bounded');
+    const pageLink=pageLinks.nth(100);
+    assert.equal(await pageLink.count(),0,'the page from API page six should not be eagerly loaded');
+    const morePages=pagesMenu.locator('.site-pages-panel button');await morePages.waitFor();
+    for(let batch=0;batch<10;batch++){
+      if(await pageLink.count())break;
+      if(!(await morePages.count()))break;
+      const previousCount=await pageLinks.count();
+      await morePages.click();
+      await pageLinks.nth(previousCount).waitFor();
+    }
+    await pageLink.waitFor();assert.equal(await pageLink.getAttribute('href'),`/page/${pageTail.slug}`,'the API page-six result should be the 101st navigation entry');await pageLink.click();
+    await reader.locator('.article-body').filter({hasText:'Navigation fixture'}).waitFor();
+
+    await reader.goto(base+'/user');
+    const termBar=reader.locator('.term-filter-bar');const categoryMenu=termBar.locator('details.term-group').filter({hasText:'分类'});
+    await categoryMenu.locator('summary').click();
+    const categoryLinks=categoryMenu.locator('.term-group-options a');await categoryLinks.nth(23).waitFor();
+    const termLink=categoryLinks.nth(24);
+    assert.equal(await termLink.count(),0,'the category from API page two should not be eagerly loaded');
+    const moreTerms=termBar.locator('.term-load-control button');await moreTerms.waitFor();
+    for(let batch=0;batch<10;batch++){
+      if(await termLink.count())break;
+      if(!(await moreTerms.count()))break;
+      const previousCount=await categoryLinks.count();
+      await moreTerms.click();
+      await categoryLinks.nth(previousCount).waitFor();
+    }
+    await termLink.waitFor();assert.equal(await termLink.getAttribute('href'),`/user?category=${encodeURIComponent(termTail.slug)}`,'the API page-two result should be the 25th category entry');await termLink.click();
+    await reader.waitForFunction(slug=>new URL(location.href).searchParams.get('category')===slug,termTail.slug);
+    await reader.locator('.post-card').first().waitFor();
+  });
+  await step('keyboard focus remains visible across reader search controls',async()=>{
+    await reader.goto(base+'/user');const searchInput=reader.getByLabel('搜索文章',{exact:true});await searchInput.waitFor();
+    let searchFocused=false;
+    for(let tab=0;tab<40;tab++){
+      if(await searchInput.evaluate(el=>el===document.activeElement)){searchFocused=true;break;}
+      await reader.keyboard.press('Tab');
+    }
+    assert.ok(searchFocused,'Tab navigation should reach the reader search field');
+    const inputFocus=await searchInput.evaluate(el=>({matches:el.matches(':focus-visible'),style:getComputedStyle(el).outlineStyle,width:getComputedStyle(el).outlineWidth}));
+    assert.deepEqual(inputFocus,{matches:true,style:'solid',width:'2px'});
+    await reader.keyboard.press('Tab');
+    const searchButton=reader.getByRole('button',{name:'搜索',exact:true});
+    assert.ok(await searchButton.evaluate(el=>el===document.activeElement),'Tab should move from search to its submit button');
+    assert.equal(await searchButton.evaluate(el=>getComputedStyle(el).outlineStyle),'solid');
   });
   await step('search, public pagination and feed privacy',async()=>{
     for(let i=0;i<3;i++)await api(owner,'POST','/api/v1/content/posts',{title:'E2E Search '+i,slug:'e2e-search-'+i,content:'needle-search-body',status:'published'},201);
     await api(owner,'POST','/api/v1/content/posts',{title:'E2E Future',slug:'e2e-future',content:'Future secret',status:'published',publishAt:new Date(Date.now()+86400000).toISOString()},201);
     await page.goto(base+'/setting');await page.getByLabel('每页文章数',{exact:true}).fill('2');await page.getByRole('button',{name:'保存阅读与评论设置',exact:true}).click();await page.getByText('阅读与评论设置已保存',{exact:true}).waitFor();
-    await reader.goto(base+'/user');await reader.getByLabel('搜索文章',{exact:true}).fill('needle-search-body');await reader.getByRole('button',{name:'搜索',exact:true}).click();
+    await reader.goto(base+'/user');const searchInput=reader.getByLabel('搜索文章',{exact:true});assert.equal(await searchInput.getAttribute('maxlength'),'200');await searchInput.fill('needle-search-body');await reader.getByRole('button',{name:'搜索',exact:true}).click();
     await reader.waitForFunction(()=>document.querySelectorAll('.post-card').length===2);await reader.getByRole('button',{name:'下一页',exact:true}).click();await reader.waitForFunction(()=>document.querySelectorAll('.post-card').length===1);
     for(const route of ['/feed.xml','/sitemap.xml']){const text=await(await fetch(base+route)).text();assert.ok(text.includes('e2e-public'));assert.ok(!text.includes('e2e-draft'));assert.ok(!text.includes('e2e-future'));}
     assert.ok((await(await fetch(base+'/robots.txt')).text()).includes('Disallow: /admin'));
   });
   const gif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7','base64');
   await step('media upload, insertion and image rendering',async()=>{
-    await page.goto(base+'/admin');await page.locator('input[type=file]').setInputFiles({name:'e2e.gif',mimeType:'image/gif',buffer:gif});
-    await page.waitForFunction(()=>Array.from(document.querySelectorAll('.media-card img')).some(i=>i.complete&&i.naturalWidth>0));
+    await page.goto(base+'/admin');await page.locator('#media').scrollIntoViewIfNeeded();await page.locator('#media input[type=file]').setInputFiles({name:'e2e.gif',mimeType:'image/gif',buffer:gif});
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('#media .media-card img')).some(i=>i.complete&&i.naturalWidth>0));
     uploaded=(await api(owner,'GET','/api/v1/media')).items[0];
-    await page.getByRole('button',{name:'插入文章',exact:true}).click();
-    assert.ok((await page.getByPlaceholder('开始写作，支持 Markdown…').inputValue()).includes(uploaded.url));
+    await page.locator('#posts').getByRole('button',{name:'+ 写文章',exact:true}).click();
+    const postContent=page.getByPlaceholder('开始写作，支持 Markdown…');await postContent.fill('Before\nAfter');
+    await postContent.evaluate(el=>el.setSelectionRange(7,7));
+    await page.locator('#media .media-card').getByRole('button',{name:'插入文章',exact:true}).click();
+    assert.equal(await postContent.inputValue(),'Before\n\n![图片说明]('+uploaded.url+')\n\nAfter');
+    assert.equal(await postContent.evaluate(el=>el.value.slice(el.selectionStart,el.selectionEnd)),'图片说明');
+    await page.locator('#post-editor').getByRole('button',{name:'看预览',exact:true}).click();
+    const postPreview=page.locator('#post-editor .editor-preview img');await postPreview.waitFor();
+    assert.equal(await postPreview.getAttribute('src'),uploaded.url);assert.equal(await postPreview.getAttribute('alt'),'图片说明');
+    await page.locator('#posts').getByRole('button',{name:'关闭编辑器',exact:true}).click();
+    await page.locator('#pages').getByRole('button',{name:'+ 新建页面',exact:true}).click();
+    const pageContent=page.getByPlaceholder('页面内容，支持 Markdown…');await pageContent.fill('Before\nDELETE\nAfter');
+    await pageContent.evaluate(el=>el.setSelectionRange(7,13));
+    await page.locator('#media .media-card').getByRole('button',{name:'插入页面',exact:true}).click();
+    assert.equal(await pageContent.inputValue(),'Before\n\n![图片说明]('+uploaded.url+')\n\nAfter');
+    await page.locator('#page-editor').getByRole('button',{name:'看预览',exact:true}).click();
+    const pagePreview=page.locator('#page-editor .editor-preview img');await pagePreview.waitFor();
+    assert.equal(await pagePreview.getAttribute('src'),uploaded.url);
+    const expectedPageHTML=await page.locator('#page-editor .editor-preview').evaluate(el=>el.innerHTML);
+    await page.locator('#page-editor .editor-title').fill('E2E Markdown Image');await page.locator('#page-editor select').selectOption('published');
+    await page.locator('#page-editor').getByRole('button',{name:'保存页面',exact:true}).click();
+    await page.locator('#pages .admin-post-row').filter({hasText:'E2E Markdown Image'}).waitFor();
+    await reader.goto(base+'/page/e2e-markdown-image');await reader.locator('.article-body img').waitFor();
+    assert.equal(await reader.locator('.article-body').innerHTML(),expectedPageHTML,'page preview should match the reader renderer');
+    const imagePage=(await api(owner,'GET','/api/v1/content/pages?includeDraft=true&page=1&pageSize=100')).items.find(item=>item.slug==='e2e-markdown-image');
+    assert.ok(imagePage);await api(owner,'DELETE','/api/v1/content/pages/'+imagePage.id,undefined,204);
     const response=await publicCtx.request.get(base+uploaded.url);assert.equal(response.status(),200);assert.deepEqual(await response.body(),gif);
   });
   await step('protected post hides body and supports password retry',async()=>{
-    await api(owner,'POST','/api/v1/content/posts',{title:'E2E Protected',slug:'e2e-protected',content:'Protected secret body',status:'published',passphrase:'read-password-123'},201);
-    const locked=await api(publicCtx,'GET','/api/v1/content/posts/e2e-protected');assert.ok(locked.locked);assert.ok(!locked.content);
+    await api(owner,'POST','/api/v1/content/posts',{title:'E2E Protected',slug:'e2e-protected',content:'Protected secret body',status:'published',passphrase:'read-password-123',customFields:{secret:'Protected custom value'}},201);
+    const locked=await api(publicCtx,'GET','/api/v1/content/posts/e2e-protected');assert.ok(locked.locked);assert.ok(!locked.content);assert.equal('customFields' in locked,false);
     assert.ok(!(await(await fetch(base+'/user/e2e-protected')).text()).includes('Protected secret body'));
     await reader.goto(base+'/user/e2e-protected');await reader.getByLabel('阅读口令',{exact:true}).fill('wrong-password');await reader.getByRole('button',{name:'查看正文',exact:true}).click();
     await reader.locator('.form-error').waitFor();await reader.getByLabel('阅读口令',{exact:true}).fill('read-password-123');await reader.getByRole('button',{name:'查看正文',exact:true}).click();
     await reader.locator('.article-body').filter({hasText:'Protected secret body'}).waitFor();
+    await reader.locator('.post-custom-fields').getByText('Protected custom value',{exact:true}).waitFor();
   });
   await step('reject disguised image uploads',async()=>{
     const token=(await owner.cookies(base)).find(c=>c.name==='app_csrf').value;
@@ -276,10 +382,10 @@ async function writePost(title,slug,content,status='published') {
   await step('anonymous comment, moderation and threaded reply',async()=>{
     await reader.goto(base+'/user/e2e-public');await reader.getByLabel('称呼',{exact:true}).fill('E2E 访客');await reader.getByLabel('评论',{exact:true}).fill('E2E 待审核评论');await reader.getByRole('button',{name:'发表评论',exact:true}).click();await reader.locator('.form-success').waitFor();
     assert.equal((await api(publicCtx,'GET','/api/v1/content/posts/e2e-public/comments')).total,0);
-    await page.goto(base+'/admin');const row=page.locator('.admin-comment-row').filter({hasText:'E2E 待审核评论'});await row.getByRole('button',{name:'通过',exact:true}).click();await row.waitFor({state:'detached'});
+    await page.goto(base+'/admin');const comments=page.locator('#comments');const row=comments.locator('.admin-comment-row').filter({hasText:'E2E 待审核评论'});await row.getByRole('button',{name:'通过',exact:true}).click();await row.waitFor({state:'detached'});
     await reader.reload();const comment=reader.locator('.comment-card').filter({hasText:'E2E 待审核评论'});await comment.getByRole('button',{name:'回复',exact:true}).click();
     await reader.getByLabel('称呼',{exact:true}).fill('E2E 回复者');await reader.getByLabel('评论',{exact:true}).fill('E2E 线程回复');await reader.getByRole('button',{name:'发表回复',exact:true}).click();await reader.locator('.form-success').waitFor();
-    await page.reload();await page.locator('.admin-comment-row').filter({hasText:'E2E 线程回复'}).getByRole('button',{name:'通过',exact:true}).click();
+    await page.reload();await page.locator('#comments .admin-comment-row').filter({hasText:'E2E 线程回复'}).getByRole('button',{name:'通过',exact:true}).click();
     await reader.reload();await reader.locator('.comment-card[data-depth="1"]').filter({hasText:'E2E 线程回复'}).waitFor();
   });
   await step('comment closure and CSRF enforcement',async()=>{
@@ -305,8 +411,14 @@ async function writePost(title,slug,content,status='published') {
   });
   await step('admin pagination beyond 100 and audit pagination',async()=>{
     for(let i=0;i<101;i++)await api(owner,'POST','/api/v1/content/posts',{title:'Paging fixture '+String(i).padStart(3,'0'),slug:'paging-'+i,content:'paging',status:'draft'},201);
-    await page.goto(base+'/admin');await page.locator('#posts .pagination').getByRole('button',{name:'下一页',exact:true}).click();await page.locator('#posts .pagination').getByText(/2 \/ 2/).waitFor();
-    await page.waitForFunction(()=>{const count=document.querySelectorAll('#posts .admin-post-row').length;return count>0&&count<100;});
+    await page.goto(base+'/admin');const posts=page.locator('#posts');await posts.getByRole('button',{name:'草稿',exact:true}).click();
+    await page.waitForFunction(()=>{const rows=[...document.querySelectorAll('#posts .admin-post-row')];return rows.length>0&&rows.every(row=>row.querySelector('.post-status')?.classList.contains('draft'));});
+    const draftPager=posts.locator('.pagination');const draftSummary=await draftPager.locator('span').innerText();const draftPages=draftSummary.match(/^1 \/ (\d+) · 共 (\d+) 篇$/);assert.ok(draftPages&&Number(draftPages[1])>=2&&Number(draftPages[2])>=101,'draft filter should report its own cross-page total');
+    await draftPager.getByRole('button',{name:'下一页',exact:true}).click();await draftPager.locator('span').filter({hasText:/^2 \/ \d+/}).waitFor();
+    await page.waitForFunction(()=>{const rows=[...document.querySelectorAll('#posts .admin-post-row')];return rows.length>0&&rows.every(row=>row.querySelector('.post-status')?.classList.contains('draft'));});
+    await posts.getByRole('button',{name:'已发布',exact:true}).click();await page.waitForFunction(()=>{const rows=[...document.querySelectorAll('#posts .admin-post-row')];return rows.length>0&&rows.every(row=>row.querySelector('.post-status')?.classList.contains('published'));});
+    await posts.getByRole('button',{name:'全部',exact:true}).click();const postsPager=posts.locator('.pagination');await postsPager.getByRole('button',{name:'下一页',exact:true}).click();await postsPager.locator('span').filter({hasText:/^2 \/ \d+/}).waitFor();
+    await page.waitForFunction(()=>{const count=document.querySelectorAll('#posts .admin-post-row').length;return count>0&&count<=100;});
     await page.goto(base+'/setting');const nextAudit=page.waitForResponse(r=>r.url().includes('/api/v1/audit?page=2&'));await page.locator('.settings-audit .pagination').getByRole('button',{name:'下一页',exact:true}).click();const audit=await(await nextAudit).json();await page.locator('.audit-row').first().filter({hasText:audit.items[0].resourceId}).waitFor();await page.locator('.settings-audit .pagination').getByText(/2 \//).waitFor();
   });
   await step('owner password change revokes other sessions',async()=>{
@@ -338,7 +450,9 @@ async function writePost(title,slug,content,status='published') {
   await step('delete post, media, taxonomy and staff through UI',async()=>{
     await page.goto(base+'/admin');const row=postRow('E2E Search 2');await row.getByRole('button',{name:'删除',exact:true}).click();await row.waitFor({state:'detached'});await api(publicCtx,'GET','/api/v1/content/posts/e2e-search-2',undefined,404);
     const asset=page.locator('.media-card').filter({hasText:'e2e.gif'});await asset.getByRole('button',{name:'删除',exact:true}).click();await asset.waitFor({state:'detached'});assert.equal((await publicCtx.request.get(base+uploaded.url)).status(),404);
-    const term=page.locator('.taxonomy-row').filter({hasText:'E2E 标签'});await term.getByRole('button',{name:'删除',exact:true}).click();await term.waitFor({state:'detached'});assert.equal(((await api(publicCtx,'GET','/api/v1/content/posts/e2e-public')).tags||[]).length,0);
+    const taxonomy=page.locator('#taxonomy');const term=taxonomy.locator('.taxonomy-row').filter({hasText:'E2E 标签'});await taxonomy.locator('.taxonomy-row').first().waitFor();
+    for(let pageNo=1;pageNo<20&&(await term.count())===0;pageNo++){const next=taxonomy.locator('.pagination').getByRole('button',{name:'下一页',exact:true});assert.ok(await next.isEnabled(),'target taxonomy should exist on a later page');await next.click();await page.waitForFunction(expected=>document.querySelector('#taxonomy .pagination span')?.textContent?.startsWith(expected),`${pageNo+1} /`);}
+    await term.getByRole('button',{name:'删除',exact:true}).click();await term.waitFor({state:'detached'});assert.equal(((await api(publicCtx,'GET','/api/v1/content/posts/e2e-public')).tags||[]).length,0);
     await page.goto(base+'/setting');const staff=page.locator('.user-row').filter({hasText:'moderator@example.com'});await staff.getByRole('button',{name:'删除',exact:true}).click();await staff.waitFor({state:'detached'});
     assert.ok(!(await api(owner,'GET','/api/v1/settings/users')).items.some(u=>u.username==='moderator'));
   });

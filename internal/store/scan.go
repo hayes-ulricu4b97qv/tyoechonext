@@ -19,7 +19,67 @@ func scanPost(row scanner) (Post, error) {
 	var post Post
 	var allowComment int
 	var publishedAt, updatedAt sql.NullString
-	err := row.Scan(&post.ID, &post.Title, &post.Slug, &post.Excerpt, &post.Content, &post.Status, &allowComment, &publishedAt, &updatedAt, &post.PassphraseHash)
+	var customFields string
+	err := row.Scan(&post.ID, &post.Title, &post.Slug, &post.Excerpt, &post.Content, &post.Status, &allowComment, &publishedAt, &updatedAt, &post.PassphraseHash, &customFields)
+	if err != nil {
+		return Post{}, err
+	}
+	post.CustomFields, err = decodeCustomFields(customFields)
+	if err != nil {
+		return Post{}, err
+	}
+	post.AllowComment = allowComment != 0
+	if publishedAt.Valid {
+		post.PublishedAt = parseTime(publishedAt.String)
+	}
+	if updatedAt.Valid {
+		post.UpdatedAt = parseTime(updatedAt.String)
+	}
+	return post, nil
+}
+
+func decodeCustomFields(raw string) (map[string]string, error) {
+	fields := map[string]string{}
+	if raw == "" || raw == "null" {
+		return fields, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return nil, fmt.Errorf("decode post custom fields: %w", err)
+	}
+	if fields == nil {
+		fields = map[string]string{}
+	}
+	return fields, nil
+}
+
+func encodeCustomFields(fields map[string]string) (string, error) {
+	if fields == nil {
+		fields = map[string]string{}
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return "", fmt.Errorf("encode post custom fields: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func equalCustomFields(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if other, ok := right[key]; !ok || other != value {
+			return false
+		}
+	}
+	return true
+}
+
+func scanPostSummary(row scanner) (Post, error) {
+	var post Post
+	var allowComment int
+	var publishedAt, updatedAt sql.NullString
+	err := row.Scan(&post.ID, &post.Title, &post.Slug, &post.Excerpt, &post.Status, &allowComment, &publishedAt, &updatedAt, &post.PassphraseHash)
 	if err != nil {
 		return Post{}, err
 	}
@@ -52,6 +112,17 @@ func scanTerm(row scanner) (Term, error) {
 	var term Term
 	var createdAt, updatedAt string
 	if err := row.Scan(&term.ID, &term.Name, &term.Slug, &term.Kind, &term.PostCount, &createdAt, &updatedAt); err != nil {
+		return Term{}, err
+	}
+	term.CreatedAt = parseTime(createdAt)
+	term.UpdatedAt = parseTime(updatedAt)
+	return term, nil
+}
+
+func scanTermWithPostID(row scanner, postID *string) (Term, error) {
+	var term Term
+	var createdAt, updatedAt string
+	if err := row.Scan(postID, &term.ID, &term.Name, &term.Slug, &term.Kind, &term.PostCount, &createdAt, &updatedAt); err != nil {
 		return Term{}, err
 	}
 	term.CreatedAt = parseTime(createdAt)
@@ -112,7 +183,7 @@ func formatTime(value time.Time) string {
 	if value.IsZero() {
 		return ""
 	}
-	return value.UTC().Format(time.RFC3339Nano)
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
 
 func parseTime(value string) time.Time {

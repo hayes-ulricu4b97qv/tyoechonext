@@ -14,6 +14,13 @@ const postSlug = rawPost ? decodeURIComponent(rawPost) : ''
 const rawPage = window.location.pathname.match(/^\/page\/(.+)$/)?.[1] ?? ''
 const pageSlug = rawPage ? decodeURIComponent(rawPage) : ''
 const pages = ref<Page[]>([])
+const pagesPage = ref(0)
+const pagesTotal = ref(0)
+const pagesLoading = ref(false)
+const pagesError = ref(false)
+const pagesRetryPage = ref(1)
+const pagesDisclosure = ref<HTMLDetailsElement | null>(null)
+const pagesPerBatch = 20
 const archive = ref<MonthCount[]>([])
 const recentPosts = ref<Post[]>([])
 const recentComments = ref<Comment[]>([])
@@ -40,7 +47,33 @@ function scrollTop() {
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') closeMenu()
+  if (event.key === 'Escape') {
+    closeMenu()
+    if (pagesDisclosure.value) pagesDisclosure.value.open = false
+  }
+}
+
+async function loadPages(pageNo: number) {
+  if (pagesLoading.value) return
+  pagesRetryPage.value = pageNo
+  pagesLoading.value = true
+  pagesError.value = false
+  try {
+    const response = await listPages(false, pageNo, pagesPerBatch)
+    pages.value = pageNo === 1 ? response.items : [...pages.value, ...response.items]
+    pagesPage.value = response.page
+    pagesTotal.value = response.total
+  } catch {
+    pagesError.value = true
+  } finally {
+    pagesLoading.value = false
+  }
+}
+
+function loadMorePages() {
+  if (!pagesLoading.value && pages.value.length < pagesTotal.value) {
+    void loadPages(pagesPage.value + 1)
+  }
 }
 
 onMounted(async () => {
@@ -50,20 +83,7 @@ onMounted(async () => {
     const site = props.status.site
     setDocumentMeta(site?.name || '博客', site?.description ?? '', site?.keywords ?? '')
   }
-  try {
-    const collected: Page[] = []
-    let pageNo = 1
-    let total = 0
-    do {
-      const response = await listPages(false, pageNo, 100)
-      collected.push(...response.items)
-      total = response.total
-      pageNo += 1
-    } while (collected.length < total && pageNo <= 20)
-    pages.value = collected
-  } catch {
-    pages.value = []
-  }
+  void loadPages(1)
   try {
     archive.value = (await listArchive()).items
   } catch {
@@ -101,7 +121,15 @@ onUnmounted(() => {
       </a>
       <nav class="site-nav" aria-label="站点" @click="closeMenu">
         <a href="/user" :class="{ active: !postSlug && !pageSlug }">文章</a>
-        <a v-for="page in pages" :key="page.id" :href="`/page/${page.slug}`" :class="{ active: pageSlug === page.slug }">{{ page.title }}</a>
+        <details v-if="pages.length || pagesLoading || pagesError" ref="pagesDisclosure" class="site-pages">
+          <summary>页面 <small>{{ pages.length }} / {{ pagesTotal }}</small></summary>
+          <div class="site-pages-panel">
+            <a v-for="page in pages" :key="page.id" :href="`/page/${page.slug}`" :class="{ active: pageSlug === page.slug }">{{ page.title }}</a>
+            <p v-if="pagesLoading" class="site-pages-status">正在加载页面…</p>
+            <p v-else-if="pagesError" class="site-pages-status">页面加载失败，请重试。</p>
+            <button v-if="pagesError || pages.length < pagesTotal" type="button" :disabled="pagesLoading" @click="pagesError ? loadPages(pagesRetryPage) : loadMorePages()">{{ pagesLoading ? '加载中…' : pagesError ? '重试' : `加载更多页面 · ${pages.length} / ${pagesTotal}` }}</button>
+          </div>
+        </details>
         <a href="/admin">管理</a>
       </nav>
     </header>

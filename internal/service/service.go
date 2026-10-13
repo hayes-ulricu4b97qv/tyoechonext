@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"errors"
+	"log/slog"
 	"regexp"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
@@ -10,6 +12,12 @@ import (
 
 // MaxContentRunes is the documented maximum length of a post or page body.
 const MaxContentRunes = 500000
+
+// MaxSearchRunes bounds work for user-controlled content search queries.
+const MaxSearchRunes = 200
+
+// maxBcryptInputBytes is bcrypt's maximum supported password input size.
+const maxBcryptInputBytes = 72
 
 var (
 	ErrValidation         = errors.New("validation error")
@@ -56,9 +64,18 @@ type TermInput struct {
 }
 
 type Service struct {
-	repo store.Repository
+	repo   store.Repository
+	mailer Mailer
+	logger *slog.Logger
 }
 
-func New(repo store.Repository) *Service {
-	return &Service{repo: repo}
+type Mailer interface {
+	Send(context.Context, string, string, string) error
+}
+
+func New(repo store.Repository, logger *slog.Logger, mailer Mailer) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{repo: repo, logger: logger, mailer: mailer}
 }

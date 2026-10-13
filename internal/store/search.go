@@ -6,10 +6,6 @@ import (
 	"strings"
 )
 
-// searchTokenLookupSQL is the indexed lookup used by post and page search.
-// It does not scan the content column with LIKE.
-const searchTokenLookupSQL = `SELECT record_id FROM search_tokens WHERE kind = ? AND token = ?`
-
 func searchTokens(parts ...string) []string {
 	seen := make(map[string]struct{})
 	tokens := make([]string, 0)
@@ -33,6 +29,15 @@ func searchTokens(parts ...string) []string {
 		}
 	}
 	return tokens
+}
+
+func searchTokenCandidatesSQL(tokenCount int) string {
+	placeholders := make([]string, tokenCount)
+	for index := range placeholders {
+		placeholders[index] = "?"
+	}
+	return `SELECT record_id FROM search_tokens WHERE kind = ? AND token IN (` + strings.Join(placeholders, ",") + `)
+		GROUP BY record_id HAVING COUNT(*) = ?`
 }
 
 func containsLiteral(parts []string, search string) bool {
@@ -81,42 +86,34 @@ func (r *SQLiteRepository) recordIDsMatching(kind, search string) ([]string, err
 	if len(tokens) == 0 {
 		return []string{}, nil
 	}
-	var matched map[string]struct{}
+	args := make([]any, 0, len(tokens)+2)
+	args = append(args, kind)
 	for _, token := range tokens {
-		rows, err := r.db.Query(searchTokenLookupSQL, kind, token)
-		if err != nil {
-			return nil, fmt.Errorf("search tokens: %w", err)
-		}
-		current := make(map[string]struct{})
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("scan search token: %w", err)
-			}
-			current[id] = struct{}{}
-		}
-		if err := rows.Err(); err != nil {
+		args = append(args, token)
+	}
+	args = append(args, len(tokens))
+	rows, err := r.db.Query(searchTokenCandidatesSQL(len(tokens)), args...)
+	if err != nil {
+		return nil, fmt.Errorf("search tokens: %w", err)
+	}
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, fmt.Errorf("scan search token candidate: %w", err)
 		}
-		rows.Close()
-		if matched == nil {
-			matched = current
-			continue
-		}
-		for id := range matched {
-			if _, ok := current[id]; !ok {
-				delete(matched, id)
-			}
-		}
-	}
-	if len(matched) == 0 {
-		return []string{}, nil
-	}
-	ids := make([]string, 0, len(matched))
-	for id := range matched {
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate search token candidates: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close search token candidates: %w", err)
+	}
+	if len(ids) == 0 {
+		return []string{}, nil
 	}
 	verified, err := r.filterLiteralMatches(kind, ids, search)
 	if err != nil {

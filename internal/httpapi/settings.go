@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/service"
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
@@ -51,7 +50,7 @@ func (s *Server) updateSite(w http.ResponseWriter, r *http.Request) {
 		Keywords    string `json:"keywords"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	updated, err := s.app.UpdateSite(store.Site{Name: input.Name, URL: input.URL, AdminMail: input.AdminMail, Timezone: input.Timezone, Description: input.Description, Keywords: input.Keywords})
@@ -95,7 +94,7 @@ func (s *Server) updateReading(w http.ResponseWriter, r *http.Request) {
 		CommentsThreaded          bool `json:"commentsThreaded"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	updated, err := s.app.UpdateReading(service.ReadingInput{
@@ -134,7 +133,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	var input accountRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	admin, err := s.app.UpdateAdminAccount(service.AccountInput{
@@ -190,13 +189,13 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var input userRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	user, err := s.app.CreateUser(service.UserInput{Username: input.Username, Email: input.Email, Password: input.Password, Role: input.Role})
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			writeError(w, http.StatusConflict, "username_taken", "Username is already in use")
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "username_taken", "用户名已被使用")
 			return
 		}
 		status, code := serviceError(err)
@@ -213,7 +212,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var input userRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	user, err := s.app.UpdateUser(r.PathValue("username"), service.UserInput{Email: input.Email, Password: input.Password, Role: input.Role, Active: input.Active})

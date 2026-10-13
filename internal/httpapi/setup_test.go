@@ -85,10 +85,20 @@ func TestIgnoredLegacyFileAndUserSetup(t *testing.T) {
 	}
 	owner := &http.Client{Jar: jar}
 	get(t, owner, server.URL+"/api/v1/system/status")
-	postJSON(t, owner, server.URL+"/api/v1/setup", map[string]string{
-		"siteName": "Next", "siteUrl": "https://example.com", "adminUsername": "owner",
+	invalidSetup := postJSON(t, owner, server.URL+"/api/v1/setup", map[string]string{
+		"siteName": "Next", "siteUrl": "https://example.com/?campaign=test", "adminUsername": "owner",
 		"adminPassword": "password1", "adminEmail": "owner@example.com", "timezone": "UTC",
+	}, http.StatusUnprocessableEntity)
+	if invalidSetup["error"].(map[string]any)["code"] != "validation_error" || repo.Initialized() {
+		t.Fatalf("setup accepted a site URL with a query or partially initialized the database: %#v", invalidSetup)
+	}
+	configured := postJSON(t, owner, server.URL+"/api/v1/setup", map[string]string{
+		"siteName": "Next", "siteUrl": "https://example.com", "adminUsername": "owner",
+		"adminPassword": "password1", "adminEmail": "owner@example.com", "timezone": " UTC ",
 	}, http.StatusCreated)
+	if configured["site"].(map[string]any)["timezone"] != "UTC" {
+		t.Fatalf("setup did not normalize timezone: %#v", configured["site"])
+	}
 
 	sessionURL, err := url.Parse(server.URL)
 	if err != nil {

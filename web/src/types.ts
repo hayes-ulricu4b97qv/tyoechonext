@@ -1,10 +1,13 @@
 export interface Site {
   name: string
   url: string
-  adminMail: string
   timezone: string
   description: string
   keywords: string
+}
+
+export interface SiteSettings extends Site {
+  adminMail: string
 }
 
 export interface ReadingSettings {
@@ -51,6 +54,7 @@ export interface Post {
   slug: string
   excerpt: string
   content?: string
+  customFields?: Record<string, string>
   locked?: boolean
   status: 'draft' | 'published'
   allowComment?: boolean
@@ -161,6 +165,21 @@ export interface AuditPage {
   total: number
   page: number
   pageSize: number
+}
+
+export interface OutboundMail {
+  id: string
+  recipient: string
+  subject: string
+  body: string
+  createdAt: string
+}
+
+export interface OutboundMailPage {
+	items: OutboundMail[]
+	total: number
+	page: number
+	pageSize: number
 }
 
 export interface Stats {

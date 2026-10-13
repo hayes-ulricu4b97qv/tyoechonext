@@ -11,10 +11,26 @@ import (
 )
 
 func (s *Service) ListPosts(search string, includeDrafts bool, page, pageSize int) (store.PostPage, error) {
+	search, err := normalizeSearchQuery(search)
+	if err != nil {
+		return store.PostPage{}, err
+	}
 	return s.repo.SearchPosts(store.PostQuery{Search: search, IncludeDrafts: includeDrafts, Page: page, PageSize: pageSize})
 }
 
+func (s *Service) ListPostsWithContent(search string, includeDrafts bool, page, pageSize int) (store.PostPage, error) {
+	search, err := normalizeSearchQuery(search)
+	if err != nil {
+		return store.PostPage{}, err
+	}
+	return s.repo.SearchPosts(store.PostQuery{Search: search, IncludeDrafts: includeDrafts, IncludeContent: true, Page: page, PageSize: pageSize})
+}
+
 func (s *Service) ListPostsByTerm(search, kind, slug string, includeDrafts bool, page, pageSize int) (store.PostPage, error) {
+	search, err := normalizeSearchQuery(search)
+	if err != nil {
+		return store.PostPage{}, err
+	}
 	kind = strings.TrimSpace(kind)
 	slug = strings.TrimSpace(slug)
 	if (kind == "") != (slug == "") || (kind != "" && kind != "category" && kind != "tag") {
@@ -27,6 +43,10 @@ func (s *Service) ListTerms(kind, search string, includeDrafts bool, page, pageS
 	kind = strings.TrimSpace(kind)
 	if kind != "" && kind != "category" && kind != "tag" {
 		return store.TermPage{}, fmt.Errorf("%w: 类型只能是分类或标签", ErrValidation)
+	}
+	search, err := normalizeSearchQuery(search)
+	if err != nil {
+		return store.TermPage{}, err
 	}
 	return s.repo.ListTerms(store.TermQuery{Kind: kind, Search: search, IncludeDrafts: includeDrafts, Page: page, PageSize: pageSize})
 }
@@ -72,10 +92,18 @@ func (s *Service) GetPost(key string, includeDraft bool) (store.Post, error) {
 }
 
 func visibleToPublic(post store.Post, now time.Time) bool {
-	if post.Status != "published" || post.PublishedAt.IsZero() {
+	return visiblePublishedContentToPublic(post.Status, post.PublishedAt, now)
+}
+
+func visiblePageToPublic(page store.Page, now time.Time) bool {
+	return visiblePublishedContentToPublic(page.Status, page.PublishedAt, now)
+}
+
+func visiblePublishedContentToPublic(status string, publishedAt, now time.Time) bool {
+	if status != "published" || publishedAt.IsZero() {
 		return false
 	}
-	return post.PublishedAt.UTC().Format("2006-01-02T15:04:05") <= now.UTC().Format("2006-01-02T15:04:05")
+	return !publishedAt.After(now)
 }
 
 func (s *Service) RevealPost(post store.Post, editor bool, passphrase string) bool {
@@ -89,6 +117,12 @@ func (s *Service) CreatePost(post store.Post) (store.Post, error) {
 	if err := validatePost(post); err != nil {
 		return store.Post{}, err
 	}
+	customFields, err := normalizeCustomFields(post.CustomFields)
+	if err != nil {
+		return store.Post{}, err
+	}
+	post.CustomFields = customFields
+	post.SetCustomFields = true
 	post.Title = strings.TrimSpace(post.Title)
 	if err := normalizePostTerms(&post); err != nil {
 		return store.Post{}, err
@@ -101,7 +135,6 @@ func (s *Service) CreatePost(post store.Post) (store.Post, error) {
 	if err := hashPassphrase(&post); err != nil {
 		return store.Post{}, err
 	}
-	var err error
 	post.Slug, err = s.uniqueSlug(post.Slug, post.Title, "")
 	if err != nil {
 		return store.Post{}, err
@@ -117,6 +150,14 @@ func (s *Service) UpdatePost(id string, input store.Post) (store.Post, error) {
 	if err := validatePost(input); err != nil {
 		return store.Post{}, err
 	}
+	if !input.SetCustomFields {
+		input.CustomFields = current.CustomFields
+	}
+	input.CustomFields, err = normalizeCustomFields(input.CustomFields)
+	if err != nil {
+		return store.Post{}, err
+	}
+	input.SetCustomFields = true
 	input.ID = current.ID
 	input.Title = strings.TrimSpace(input.Title)
 	if err := normalizePostTerms(&input); err != nil {
@@ -156,6 +197,9 @@ func hashPassphrase(post *store.Post) error {
 		post.PassphraseHash = ""
 		return nil
 	}
+	if err := validateBcryptInput(plain, "阅读口令"); err != nil {
+		return err
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
 	if err != nil {
 		return err
@@ -186,6 +230,8 @@ func (s *Service) RestorePostRevision(postID, revisionID string) (store.Post, er
 	current.Title = revision.Title
 	current.Excerpt = revision.Excerpt
 	current.Content = revision.Content
+	current.CustomFields = revision.CustomFields
+	current.SetCustomFields = true
 	current.SetPassphrase = false
 	if err := validatePost(current); err != nil {
 		return store.Post{}, err
@@ -198,6 +244,10 @@ func (s *Service) DeletePost(id string) error {
 }
 
 func (s *Service) ListPages(search string, includeDrafts bool, page, pageSize int) (store.PagePage, error) {
+	search, err := normalizeSearchQuery(search)
+	if err != nil {
+		return store.PagePage{}, err
+	}
 	return s.repo.SearchPages(store.PageQuery{Search: search, IncludeDrafts: includeDrafts, Page: page, PageSize: pageSize})
 }
 
@@ -209,7 +259,7 @@ func (s *Service) GetPage(key string, includeDraft bool) (store.Page, error) {
 	if err != nil {
 		return store.Page{}, err
 	}
-	if page.Status != "published" && !includeDraft {
+	if !includeDraft && !visiblePageToPublic(page, time.Now().UTC()) {
 		return store.Page{}, store.ErrNotFound
 	}
 	return page, nil

@@ -80,9 +80,7 @@ func (s *Service) CreateComment(postKey string, input CommentInput) (store.Comme
 	}
 	if saved.Status == "pending" {
 		body := fmt.Sprintf("文章：%s\n作者：%s\n内容：%s\n", post.Title, saved.AuthorName, saved.Content)
-		if err := s.notifyOwner(site, "新评论待审核", body); err != nil {
-			return store.Comment{}, err
-		}
+		s.notifyOwner(site, "新评论待审核", body)
 	}
 	return saved, nil
 }

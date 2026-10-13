@@ -14,7 +14,7 @@ Windows is the only supported development and deployment platform.
 - `/api/v1` — versioned JSON API
 - `/healthz` / `/readyz` — liveness and readiness checks
 
-The service redirects every page to `/setting` until setup creates the site and the owner account. Runtime data is stored in SQLite at `APP_DATA_DIR/app.db`. Opening a data directory creates that database and applies this application's schema, including column upgrades for databases it already created.
+The service redirects every page to `/setting` until setup creates the site and the owner account. Runtime data is stored in SQLite at `APP_DATA_DIR/app.db`. Opening an empty data directory creates a database with the current schema. The application does not migrate older database versions; see the operations guide before replacing a database.
 
 ## Quick start
 
@@ -30,10 +30,11 @@ Open <http://localhost:8080/setting> and complete the setup form. For developmen
 
 See [docs/architecture.md](docs/architecture.md) for the module boundaries.
 See [docs/operations.md](docs/operations.md) for native deployment, configuration, backups and recovery.
+Password recovery requires SMTP configuration; see the operations guide for the supported TLS modes and environment variables.
 
 ## Runtime requirements
 
-* Go 1.22 or newer
+* Go 1.27.2 or newer
 * Windows with PowerShell
 * Node.js 22 or newer for the Vue build
 * GCC (MinGW-w64) on PATH for CGO SQLite builds
@@ -41,7 +42,7 @@ See [docs/operations.md](docs/operations.md) for native deployment, configuratio
 
 SQLite stores this personal blog's content, accounts and sessions. Media files are stored in `APP_MEDIA_DIR`.
 
-Article listing accepts `q`, `category`, `tag`, `month`, `order` (`published` by default, or `updated`), `page`, and `pageSize`. An explicit `pageSize` outside 1–100 is rejected. Sessions are persisted in SQLite with only a SHA-256 token hash stored server side. Each session references `users.id`, so a login remains valid for a later request against the same database. `APP_SESSION_TTL_MIN` sets the session lifetime in minutes (default 1440).
+Article listing accepts `q`, `category`, `tag`, `month`, `order` (`published` by default, or `updated`), `status` (`draft` or `published`), `page`, and `pageSize`. The draft status filter requires a content editor and is applied before pagination. Search terms are limited to 200 Unicode characters; an explicit `pageSize` outside 1–100 is rejected. Sessions are persisted in SQLite with only a SHA-256 token hash stored server side. Each session references `users.id`, so a login remains valid for a later request against the same database. `APP_SESSION_TTL_MIN` sets the session lifetime in minutes (default 1440); values outside the representable duration range fall back to the default.
 Search terms are treated literally, including `%` and `_`.
 
 Posts accept `categories` and `tags` as JSON string arrays. The Go service stores them in normalized taxonomy tables and exposes published term counts through `GET /api/v1/content/terms`. Content editors can manage terms with `POST/PUT/DELETE /api/v1/content/terms`. The admin form splits a comma-separated field into those arrays before sending the request.
@@ -49,6 +50,7 @@ Post lists can be filtered with `category=<slug>` and/or `tag=<slug>`; when both
 The Vue reader exposes published categories, tags, and search terms as shareable URL filters.
 Article details render Markdown content in Vue and sanitize generated HTML before insertion.
 The Go service validates content limits: titles up to 200 characters, slugs up to 120, excerpts up to 500, and bodies up to 500,000 characters.
+Articles can include a `customFields` string map (up to 50 fields and 20,000 combined characters). Fields are saved with revision snapshots, displayed as text on article details, and returned only when the reader can see the body; a post passphrase protects both together.
 Content editors can create independent pages through `GET/POST /api/v1/content/pages` and update or delete them through `/api/v1/content/pages/{id}`.
 When editing an article without a slug, the existing permalink is preserved; only new articles derive a slug from the title. Automatic slugs preserve Unicode letters and digits, so non-Latin titles and taxonomy names keep stable readable URLs.
 Editors can preview drafts from the admin list; draft routes remain unavailable to anonymous readers.

@@ -22,7 +22,8 @@ func (r *SQLiteRepository) ListComments(query CommentQuery) (CommentPage, error)
 		where += " AND c.status = 'approved'"
 	}
 	if query.PublishedPostsOnly {
-		where += " AND p.status = 'published'"
+		where += " AND p.status = 'published' AND p.published_at <= ?"
+		args = append(args, formatTime(time.Now().UTC()))
 	}
 	from := "comments c JOIN posts p ON p.id = c.post_id"
 	var total int

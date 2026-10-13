@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 )
@@ -62,14 +63,17 @@ func validateSetup(input SetupInput) error {
 	if strings.TrimSpace(input.SiteName) == "" || len(strings.TrimSpace(input.SiteName)) > 80 {
 		return fmt.Errorf("%w: 站点名称需要 1 到 80 个字符", ErrValidation)
 	}
-	if !validURL(input.SiteURL) {
-		return fmt.Errorf("%w: 站点地址必须是有效的 http 或 https 地址", ErrValidation)
+	if !validSiteURL(input.SiteURL) {
+		return fmt.Errorf("%w: 站点地址只能包含 http 或 https 协议和域名", ErrValidation)
 	}
 	if !usernamePattern.MatchString(input.AdminUsername) {
 		return fmt.Errorf("%w: 用户名需要 3 到 32 个字符，只能使用字母、数字、_ 或 -", ErrValidation)
 	}
 	if len(input.AdminPassword) < 8 {
 		return fmt.Errorf("%w: 密码至少 8 个字符", ErrValidation)
+	}
+	if err := validateBcryptInput(input.AdminPassword, "管理员密码"); err != nil {
+		return err
 	}
 	if !validEmail(input.AdminEmail) {
 		return fmt.Errorf("%w: 邮箱格式不正确", ErrValidation)
@@ -79,6 +83,9 @@ func validateSetup(input SetupInput) error {
 
 func validatePost(post store.Post) error {
 	if err := validateContentFields(post.Title, post.Slug, post.Excerpt, post.Content); err != nil {
+		return err
+	}
+	if _, err := normalizeCustomFields(post.CustomFields); err != nil {
 		return err
 	}
 	if post.Status != "" && post.Status != "draft" && post.Status != "published" {
@@ -91,6 +98,40 @@ func validatePost(post store.Post) error {
 		return err
 	}
 	return nil
+}
+
+func normalizeCustomFields(fields map[string]string) (map[string]string, error) {
+	const (
+		maxFields     = 50
+		maxKeyRunes   = 80
+		maxValueRunes = 2000
+		maxTotalRunes = 20_000
+	)
+	if len(fields) > maxFields {
+		return nil, fmt.Errorf("%w: 自定义字段最多 %d 项", ErrValidation, maxFields)
+	}
+	normalized := make(map[string]string, len(fields))
+	totalRunes := 0
+	for rawKey, value := range fields {
+		key := strings.TrimSpace(rawKey)
+		keyRunes := runeLength(key)
+		valueRunes := runeLength(value)
+		if keyRunes == 0 || keyRunes > maxKeyRunes {
+			return nil, fmt.Errorf("%w: 自定义字段名称需要 1 到 %d 个字符", ErrValidation, maxKeyRunes)
+		}
+		if valueRunes > maxValueRunes {
+			return nil, fmt.Errorf("%w: 自定义字段值最多 %d 个字符", ErrValidation, maxValueRunes)
+		}
+		if _, exists := normalized[key]; exists {
+			return nil, fmt.Errorf("%w: 自定义字段名称不能重复", ErrValidation)
+		}
+		totalRunes += keyRunes + valueRunes
+		if totalRunes > maxTotalRunes {
+			return nil, fmt.Errorf("%w: 自定义字段合计最多 %d 个字符", ErrValidation, maxTotalRunes)
+		}
+		normalized[key] = value
+	}
+	return normalized, nil
 }
 
 func validatePage(page store.Page) error {
@@ -182,8 +223,20 @@ func validateUserInput(input UserInput, creating bool) error {
 	if creating && len(input.Password) < 8 {
 		return fmt.Errorf("%w: 密码至少 8 个字符", ErrValidation)
 	}
+	if creating {
+		if err := validateBcryptInput(input.Password, "密码"); err != nil {
+			return err
+		}
+	}
 	if !validStaffRole(input.Role) {
 		return fmt.Errorf("%w: 角色只能是编辑或审核员", ErrValidation)
+	}
+	return nil
+}
+
+func validateBcryptInput(value, label string) error {
+	if len(value) > maxBcryptInputBytes {
+		return fmt.Errorf("%w: %s最多 72 个 UTF-8 字节（bcrypt 限制）", ErrValidation, label)
 	}
 	return nil
 }
@@ -207,9 +260,24 @@ func runeLength(value string) int {
 	return len([]rune(value))
 }
 
+func normalizeSearchQuery(value string) (string, error) {
+	if utf8.RuneCountInString(value) > MaxSearchRunes {
+		return "", fmt.Errorf("%w: 搜索词最多 %d 个字符", ErrValidation, MaxSearchRunes)
+	}
+	return strings.TrimSpace(value), nil
+}
+
 func validURL(raw string) bool {
 	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
+
+func validSiteURL(raw string) bool {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
+	return err == nil &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+		parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" &&
+		(parsed.Path == "" || parsed.Path == "/")
 }
 
 func validEmail(raw string) bool {

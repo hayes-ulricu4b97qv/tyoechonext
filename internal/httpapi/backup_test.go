@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/config"
@@ -128,5 +129,78 @@ func TestBackupFailureAndRecovery(t *testing.T) {
 	restoredMedia, err := io.ReadAll(response.Body)
 	if err != nil || response.StatusCode != http.StatusOK || !bytes.Equal(restoredMedia, data) {
 		t.Fatalf("recovered media status=%d err=%v", response.StatusCode, err)
+	}
+}
+
+func TestAddZipFileDoesNotIncludeSymlinkTargets(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside.txt")
+	link := filepath.Join(dir, "media-link")
+	if err := os.WriteFile(target, []byte("outside data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symbolic links are not available: %v", err)
+	}
+
+	var archiveBytes bytes.Buffer
+	archive := zip.NewWriter(&archiveBytes)
+	if err := addZipFile(archive, "media/media-link", link); err == nil {
+		t.Fatal("included a symbolic-link target in the backup")
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(archiveBytes.Bytes()), int64(archiveBytes.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.File) != 0 {
+		t.Fatalf("archive contains entries after the symbolic-link rejection: %#v", reader.File)
+	}
+}
+
+func TestServeMediaDoesNotFollowSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	mediaRoot := filepath.Join(dir, "uploads")
+	t.Setenv("APP_MEDIA_DIR", mediaRoot)
+	repo, err := store.NewSQLiteRepository(filepath.Join(dir, "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	server := httptest.NewServer(NewServer(repo, config.Settings{SessionTTLMin: 60}, nil).Handler())
+	t.Cleanup(server.Close)
+	jar, _ := cookiejar.New(nil)
+	owner := &http.Client{Jar: jar}
+	setupSite(t, owner, server.URL, "UTC")
+	upload := uploadGIF(t, owner, server.URL)
+	media, err := repo.Media(upload["id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(mediaRoot, media.StorageKey)
+	target := filepath.Join(dir, "private.txt")
+	if err := os.WriteFile(target, []byte("private host data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(mediaPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, mediaPath); err != nil {
+		t.Skipf("symbolic links are not available: %v", err)
+	}
+
+	response, err := http.Get(server.URL + "/media/" + media.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusInternalServerError || strings.Contains(string(body), "private host data") {
+		t.Fatalf("symlink media response status=%d body=%q", response.StatusCode, body)
 	}
 }

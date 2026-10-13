@@ -5,10 +5,13 @@ import (
 	"time"
 )
 
+const maxTrackedHitKeys = 10000
+
 // HitCounter counts recent events for one process. Each server keeps its own counter.
 type HitCounter struct {
 	mu     sync.Mutex
 	events map[string][]time.Time
+	calls  uint64
 }
 
 func NewHitCounter() *HitCounter {
@@ -22,6 +25,9 @@ func (h *HitCounter) Allow(key string, limit int, window time.Duration) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
+	if !h.makeRoom(key, now, window) {
+		return false
+	}
 	kept := pruneTimes(h.events[key], now, window)
 	if len(kept) >= limit {
 		h.events[key] = kept
@@ -31,17 +37,21 @@ func (h *HitCounter) Allow(key string, limit int, window time.Duration) bool {
 	return true
 }
 
-// RecordFailure stores one failure and reports whether the key is now over the limit.
-func (h *HitCounter) RecordFailure(key string, limit int, window time.Duration) bool {
-	if h == nil || limit < 1 || key == "" {
-		return false
+func (h *HitCounter) makeRoom(key string, now time.Time, window time.Duration) bool {
+	h.calls++
+	_, exists := h.events[key]
+	if h.calls%128 == 0 || (!exists && len(h.events) >= maxTrackedHitKeys) {
+		for trackedKey, times := range h.events {
+			kept := pruneTimes(times, now, window)
+			if len(kept) == 0 {
+				delete(h.events, trackedKey)
+			} else {
+				h.events[trackedKey] = kept
+			}
+		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	now := time.Now()
-	kept := append(pruneTimes(h.events[key], now, window), now)
-	h.events[key] = kept
-	return len(kept) >= limit
+	_, exists = h.events[key]
+	return exists || len(h.events) < maxTrackedHitKeys
 }
 
 func (h *HitCounter) Reset(key string) {

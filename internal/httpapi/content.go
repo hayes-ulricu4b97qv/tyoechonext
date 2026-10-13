@@ -19,12 +19,16 @@ func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	includeDrafts := r.URL.Query().Get("includeDraft") == "true"
-	if includeDrafts && !s.requireContentEditor(w, r) {
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	if (includeDrafts || statusFilter == "draft") && !s.requireContentEditor(w, r) {
 		return
+	}
+	if statusFilter == "draft" {
+		includeDrafts = true
 	}
 	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
-	posts, err := s.app.ListPostsByTerms(r.URL.Query().Get("q"), category, tag, r.URL.Query().Get("month"), r.URL.Query().Get("order"), includeDrafts, page, pageSize)
+	posts, err := s.app.ListPostsByTerms(r.URL.Query().Get("q"), category, tag, r.URL.Query().Get("month"), r.URL.Query().Get("order"), includeDrafts, statusFilter, page, pageSize)
 	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
@@ -106,13 +110,13 @@ func (s *Server) createTerm(w http.ResponseWriter, r *http.Request) {
 	}
 	var input termRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	term, err := s.app.CreateTerm(service.TermInput{Name: input.Name, Kind: input.Kind})
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			writeError(w, http.StatusConflict, "term_taken", "A term with this name or slug already exists")
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "term_taken", "已有同名分类或标签")
 			return
 		}
 		status, code := serviceError(err)
@@ -129,13 +133,13 @@ func (s *Server) updateTerm(w http.ResponseWriter, r *http.Request) {
 	}
 	var input termRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	term, err := s.app.UpdateTerm(r.PathValue("id"), service.TermInput{Name: input.Name, Kind: input.Kind})
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			writeError(w, http.StatusConflict, "term_taken", "A term with this name or slug already exists")
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "term_taken", "已有同名分类或标签")
 			return
 		}
 		status, code := serviceError(err)
@@ -222,7 +226,7 @@ type commentRequest struct {
 func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 	var input commentRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	if !s.allowComment(r) {
@@ -280,7 +284,7 @@ func (s *Server) updateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var input commentStatusRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	comment, err := s.app.ModerateComment(r.PathValue("id"), input.Status)
@@ -333,7 +337,8 @@ func (s *Server) uploadMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize+(1<<20))
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
-		if strings.Contains(err.Error(), "request body too large") {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "file_too_large", "Media files must be 10 MB or smaller")
 		} else {
 			writeError(w, http.StatusBadRequest, "invalid_request", "A multipart file field is required")
@@ -466,7 +471,7 @@ func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	file, err := os.Open(filepath.Join(s.mediaRoot, storageKey))
+	file, _, err := openRegularFile(filepath.Join(s.mediaRoot, storageKey))
 	if errors.Is(err, os.ErrNotExist) {
 		http.NotFound(w, r)
 		return
@@ -487,7 +492,7 @@ func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
 	}
 	var input postRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	post, err := input.post()
@@ -497,6 +502,10 @@ func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.app.CreatePost(applyAllowComment(post, input, true))
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "post_taken", "已有使用该固定链接的文章")
+			return
+		}
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
 		return
@@ -520,7 +529,7 @@ func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
 	}
 	var input postRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	nextPost, err := input.post()
@@ -530,6 +539,10 @@ func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := s.app.UpdatePost(post.ID, applyAllowComment(nextPost, input, post.AllowComment))
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "post_taken", "已有使用该固定链接的文章")
+			return
+		}
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
 		return
@@ -558,13 +571,13 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var input pageRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	created, err := s.app.CreatePage(input.page())
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			writeError(w, http.StatusConflict, "page_taken", "A page with this slug already exists")
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "page_taken", "已有使用该固定链接的页面")
 			return
 		}
 		status, code := serviceError(err)
@@ -590,13 +603,13 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 	}
 	var input pageRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeJSONDecodeError(w, err)
 		return
 	}
 	updated, err := s.app.UpdatePage(page.ID, input.page())
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			writeError(w, http.StatusConflict, "page_taken", "A page with this slug already exists")
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "page_taken", "已有使用该固定链接的页面")
 			return
 		}
 		status, code := serviceError(err)

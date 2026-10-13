@@ -104,7 +104,7 @@ func (r *SQLiteRepository) CreateUser(user User) (User, error) {
 	user.UpdatedAt = now
 	_, err := r.db.Exec(`INSERT INTO users(id, username, password_hash, email, role, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, user.ID, user.Username, user.PasswordHash, user.Email, user.Role, boolToInt(user.Active), formatTime(user.CreatedAt), formatTime(user.UpdatedAt))
 	if err != nil {
-		return User{}, fmt.Errorf("create user: %w", err)
+		return User{}, wrapSQLiteWriteError("create user", err)
 	}
 	return r.User(user.Username)
 }
