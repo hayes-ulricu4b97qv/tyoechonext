@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"regexp"
+	"sync"
+	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 	_ "time/tzdata"
@@ -67,9 +69,18 @@ type TermInput struct {
 }
 
 type Service struct {
-	repo   store.Repository
-	mailer Mailer
-	logger *slog.Logger
+	repo                               store.Repository
+	mailer                             Mailer
+	logger                             *slog.Logger
+	passwordResetSlots                 chan struct{}
+	passwordResetLogMu                 sync.Mutex
+	lastPasswordResetLog               time.Time
+	passwordResetFailureLogMu          sync.Mutex
+	lastPasswordResetFailureLog        time.Time
+	passwordResetFailureLogsSuppressed uint64
+	backgroundWorkMu                   sync.Mutex
+	backgroundWorkClosing              bool
+	backgroundWork                     sync.WaitGroup
 }
 
 type Mailer interface {
@@ -80,5 +91,10 @@ func New(repo store.Repository, logger *slog.Logger, mailer Mailer) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{repo: repo, logger: logger, mailer: mailer}
+	return &Service{
+		repo:               repo,
+		logger:             logger,
+		mailer:             mailer,
+		passwordResetSlots: make(chan struct{}, 4),
+	}
 }

@@ -128,6 +128,7 @@ var fallbackErrorMessages = map[string]string{
 	"not_ready":             "服务尚未就绪",
 	"page_taken":            "已有使用该固定链接的页面",
 	"post_taken":            "已有使用该固定链接的文章",
+	"password_reset_busy":   "密码找回服务繁忙，请稍后重试",
 	"rate_limited":          "请求过于频繁，请稍后再试",
 	"read_failed":           "读取失败，请稍后再试",
 	"request_too_large":     "请求内容超过允许的大小",

@@ -25,6 +25,7 @@ const (
 	maxForwardedForBytes      = 4096
 	maxForwardedForHops       = 32
 	postRevisionPageSizeLimit = 20
+	forgotResponseFloor       = 250 * time.Millisecond
 )
 
 func (s *Server) loginFailureLimit() int {
@@ -136,7 +137,7 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	var request forgotRequest
 	if err := decodeJSON(w, r, &request); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	limit := s.settings.PasswordResetLimit
@@ -147,10 +148,30 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "请求过于频繁，请稍后再试")
 		return
 	}
-	if !s.app.MailAvailable() {
+	acceptedSince := time.Now()
+	reservation, reserveErr := s.app.ReservePasswordReset(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if errors.Is(reserveErr, service.ErrMailUnavailable) {
 		writeError(w, http.StatusServiceUnavailable, "mail_unavailable", "站点尚未配置安全邮件投递，暂时无法找回密码")
 		return
 	}
+	if errors.Is(reserveErr, service.ErrPasswordResetBusy) {
+		if waitForPasswordResetResponse(r.Context(), acceptedSince, nil, nil) {
+			writeError(w, http.StatusServiceUnavailable, "password_reset_busy", "密码找回服务繁忙，请稍后重试")
+		}
+		return
+	}
+	if reserveErr != nil {
+		s.logger.Warn("password reset capacity reservation failed", "error", reserveErr)
+		if waitForPasswordResetResponse(r.Context(), acceptedSince, nil, nil) {
+			writeError(w, http.StatusServiceUnavailable, "not_ready", "密码找回服务暂不可用，请稍后重试")
+		}
+		return
+	}
+	defer reservation.Release()
+
 	account, lookupErr := s.repo.UserContext(r.Context(), strings.TrimSpace(request.Username))
 	if r.Context().Err() != nil {
 		return
@@ -165,25 +186,79 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		accountLimit = 1
 	}
 	if accountKnown && !s.forgotAccounts.Allow(account.Username, accountLimit, 15*time.Minute) {
-		writePasswordResetAccepted(w)
+		reservation.Release()
+		if waitForPasswordResetResponse(r.Context(), acceptedSince, nil, nil) {
+			writePasswordResetAccepted(w)
+		}
 		return
 	}
-	requestErr := s.app.RequestPasswordReset(r.Context(), request.Username)
-	if requestErr != nil && accountKnown {
-		// Do not make a failed SMTP attempt block an immediate retry.
+	delivery, requestErr := reservation.RequestAsync(r.Context(), request.Username)
+	if accountKnown && (requestErr != nil || delivery == nil) {
+		// Do not cool down a known account when no reset email was queued.
 		s.forgotAccounts.Reset(account.Username)
 	}
+	var deliveryFailed func()
+	if accountKnown {
+		deliveryFailed = func() { s.forgotAccounts.Reset(account.Username) }
+	}
 	if r.Context().Err() != nil {
+		watchPasswordResetDelivery(delivery, deliveryFailed)
 		return
 	}
 	if errors.Is(requestErr, service.ErrMailUnavailable) {
 		writeError(w, http.StatusServiceUnavailable, "mail_unavailable", "站点尚未配置安全邮件投递，暂时无法找回密码")
 	} else {
-		if requestErr != nil {
+		if requestErr != nil &&
+			!errors.Is(requestErr, service.ErrPasswordResetBusy) &&
+			!errors.Is(requestErr, service.ErrPasswordResetCleanup) &&
+			s.forgotFailureLogs.Allow("request-failed", 1, time.Minute) {
 			s.logger.Warn("password reset request failed", "error", requestErr)
 		}
-		writePasswordResetAccepted(w)
+		if waitForPasswordResetResponse(r.Context(), acceptedSince, delivery, deliveryFailed) {
+			writePasswordResetAccepted(w)
+		}
 	}
+}
+
+func waitForPasswordResetResponse(ctx context.Context, started time.Time, delivery <-chan error, onDeliveryFailure func()) bool {
+	remaining := time.Until(started.Add(forgotResponseFloor))
+	if remaining <= 0 {
+		watchPasswordResetDelivery(delivery, onDeliveryFailure)
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	if delivery != nil {
+		select {
+		case deliveryErr, ok := <-delivery:
+			if ok && deliveryErr != nil && onDeliveryFailure != nil {
+				onDeliveryFailure()
+			}
+		case <-timer.C:
+			watchPasswordResetDelivery(delivery, onDeliveryFailure)
+			return ctx.Err() == nil
+		case <-ctx.Done():
+			watchPasswordResetDelivery(delivery, onDeliveryFailure)
+			return false
+		}
+	}
+	select {
+	case <-timer.C:
+		return ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func watchPasswordResetDelivery(delivery <-chan error, onDeliveryFailure func()) {
+	if delivery == nil || onDeliveryFailure == nil {
+		return
+	}
+	go func() {
+		if deliveryErr, ok := <-delivery; ok && deliveryErr != nil {
+			onDeliveryFailure()
+		}
+	}()
 }
 
 func writePasswordResetAccepted(w http.ResponseWriter) {
@@ -233,7 +308,7 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	var request resetRequest
 	if err := decodeJSON(w, r, &request); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if err := s.app.ResetPasswordContext(r.Context(), request.Token, request.Password); err != nil {

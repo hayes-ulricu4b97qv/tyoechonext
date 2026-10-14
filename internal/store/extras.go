@@ -236,6 +236,33 @@ func (r *SQLiteRepository) SavePasswordResetContext(ctx context.Context, usernam
 	return nil
 }
 
+func (r *SQLiteRepository) CreatePasswordResetForActiveUserContext(ctx context.Context, username, tokenHash string, expires time.Time) (User, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("begin active password reset save: %w", err)
+	}
+	defer tx.Rollback()
+
+	user, err := scanUser(tx.QueryRowContext(ctx, `SELECT id, username, password_hash, email, role, active, created_at, updated_at FROM users WHERE username = ? AND active = 1`, username))
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("read active user for password reset: %w", err)
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_resets WHERE username = ? OR expires_at <= ?`, username, formatTime(now)); err != nil {
+		return User{}, fmt.Errorf("replace old password resets: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO password_resets(token_hash, username, expires_at, created_at) VALUES (?, ?, ?, ?)`, tokenHash, username, formatTime(expires), formatTime(now)); err != nil {
+		return User{}, fmt.Errorf("save password reset: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, fmt.Errorf("commit password reset save: %w", err)
+	}
+	return user, nil
+}
+
 func (r *SQLiteRepository) DeletePasswordReset(tokenHash string) error {
 	return r.DeletePasswordResetContext(context.Background(), tokenHash)
 }

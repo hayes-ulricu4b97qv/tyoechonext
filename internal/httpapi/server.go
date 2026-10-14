@@ -57,18 +57,20 @@ var scalarAPIQueryParameters = []string{
 var scalarReaderQueryParameters = []string{"category", "month", "page", "preview", "q", "tag"}
 
 type Server struct {
-	repo           store.Repository
-	app            *service.Service
-	settings       config.Settings
-	logger         *slog.Logger
-	webDir         string
-	mediaRoot      string
-	mediaDeleteMu  sync.Mutex
-	trustedProxies []*net.IPNet
-	loginFailures  *service.HitCounter
-	commentHits    *service.HitCounter
-	forgotHits     *service.HitCounter
-	forgotAccounts *service.HitCounter
+	repo                  store.Repository
+	app                   *service.Service
+	settings              config.Settings
+	logger                *slog.Logger
+	webDir                string
+	mediaRoot             string
+	mediaDeleteMu         sync.Mutex
+	trustedProxies        []*net.IPNet
+	loginFailures         *service.HitCounter
+	commentHits           *service.HitCounter
+	forgotHits            *service.HitCounter
+	forgotAccounts        *service.HitCounter
+	forgotFailureLogs     *service.HitCounter
+	repositoryFailureLogs *service.HitCounter
 }
 
 func NewServer(repo store.Repository, settings config.Settings, logger *slog.Logger, mailers ...service.Mailer) *Server {
@@ -92,18 +94,25 @@ func NewServer(repo store.Repository, settings config.Settings, logger *slog.Log
 		mailer = mailers[0]
 	}
 	return &Server{
-		repo:           repo,
-		app:            service.New(repo, logger, mailer),
-		settings:       settings,
-		logger:         logger,
-		webDir:         webDir,
-		mediaRoot:      mediaRoot,
-		trustedProxies: parseTrustedProxyCIDRs(settings.TrustedProxyCIDRs, logger),
-		loginFailures:  service.NewHitCounter(),
-		commentHits:    service.NewHitCounter(),
-		forgotHits:     service.NewHitCounter(),
-		forgotAccounts: service.NewHitCounter(),
+		repo:                  repo,
+		app:                   service.New(repo, logger, mailer),
+		settings:              settings,
+		logger:                logger,
+		webDir:                webDir,
+		mediaRoot:             mediaRoot,
+		trustedProxies:        parseTrustedProxyCIDRs(settings.TrustedProxyCIDRs, logger),
+		loginFailures:         service.NewHitCounter(),
+		commentHits:           service.NewHitCounter(),
+		forgotHits:            service.NewHitCounter(),
+		forgotAccounts:        service.NewHitCounter(),
+		forgotFailureLogs:     service.NewHitCounter(),
+		repositoryFailureLogs: service.NewHitCounter(),
 	}
+}
+
+// WaitForBackgroundWork drains asynchronous application work during shutdown.
+func (s *Server) WaitForBackgroundWork(ctx context.Context) error {
+	return s.app.WaitForBackgroundWork(ctx)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -166,7 +175,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) writeRepositoryUnavailable(w http.ResponseWriter, r *http.Request, err error) {
-	s.logger.Error("repository unavailable", "error", err)
+	if s.repositoryFailureLogs.Allow("repository-unavailable", 1, time.Minute) {
+		s.logger.Error("repository unavailable", "error", err)
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		writeError(w, http.StatusServiceUnavailable, "not_ready", "The content store is unavailable")
 		return
@@ -358,7 +369,14 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	baseURL := strings.TrimRight(site.URL, "/")
-	editor := s.canEditContent(r)
+	editor, err := s.contentEditorAccess(r.Context(), r)
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
 	passphrase := r.Header.Get("X-Post-Passphrase")
 	posts, err := s.app.ListPostsForFeed(r.Context(), 1, 100)
 	if err != nil {
@@ -611,24 +629,11 @@ func (input pageRequest) page() store.Page {
 }
 
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if !s.isAdmin(r) {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue")
-		return false
-	}
-	return true
+	return s.requireRole(w, r, "owner", "editor", "moderator")
 }
 
 func (s *Server) requireOwner(w http.ResponseWriter, r *http.Request) bool {
-	user, ok := s.currentAdmin(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue")
-		return false
-	}
-	if user.Role != "owner" {
-		writeError(w, http.StatusForbidden, "forbidden", "Owner permission is required")
-		return false
-	}
-	return true
+	return s.requireRoleWithMessage(w, r, "Owner permission is required", "owner")
 }
 
 func (s *Server) requireContentEditor(w http.ResponseWriter, r *http.Request) bool {
@@ -640,6 +645,10 @@ func (s *Server) requireModerator(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
+	return s.requireRoleWithMessage(w, r, "You do not have permission for this action", roles...)
+}
+
+func (s *Server) requireRoleWithMessage(w http.ResponseWriter, r *http.Request, deniedMessage string, roles ...string) bool {
 	user, err := s.authenticatedAdmin(r.Context(), r)
 	if r.Context().Err() != nil {
 		return false
@@ -660,18 +669,19 @@ func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, roles ...st
 			return true
 		}
 	}
-	writeError(w, http.StatusForbidden, "forbidden", "You do not have permission for this action")
+	writeError(w, http.StatusForbidden, "forbidden", deniedMessage)
 	return false
 }
 
-func (s *Server) isAdmin(r *http.Request) bool {
-	_, ok := s.currentAdmin(r)
-	return ok
-}
-
-func (s *Server) canEditContent(r *http.Request) bool {
-	user, ok := s.currentAdmin(r)
-	return ok && (user.Role == "owner" || user.Role == "editor")
+func (s *Server) contentEditorAccess(ctx context.Context, r *http.Request) (bool, error) {
+	user, err := s.authenticatedAdmin(ctx, r)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return user.Role == "owner" || user.Role == "editor", nil
 }
 
 func (s *Server) currentAdmin(r *http.Request) (*store.Admin, bool) {
@@ -1269,7 +1279,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 	return nil
 }
 
-func writeJSONDecodeError(w http.ResponseWriter, err error) {
+func writeJSONDecodeError(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds the supported size limit")

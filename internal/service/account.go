@@ -11,6 +11,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const authenticationTimingHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
 func (s *Service) Initialize(input SetupInput) (*store.Site, error) {
 	return s.InitializeContext(context.Background(), input)
 }
@@ -63,6 +65,15 @@ func (s *Service) Authenticate(username, password string) (*store.Admin, error) 
 func (s *Service) AuthenticateContext(ctx context.Context, username, password string) (*store.Admin, error) {
 	user, err := s.repo.UserContext(ctx, username)
 	if errors.Is(err, store.ErrNotFound) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		// Keep unknown-user failures close to wrong-password failures without
+		// allowing the dummy hash to authenticate any account.
+		_ = bcrypt.CompareHashAndPassword([]byte(authenticationTimingHash), []byte(password))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, ErrInvalidCredentials
 	}
 	if err != nil {

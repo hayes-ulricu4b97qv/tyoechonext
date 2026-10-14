@@ -326,6 +326,7 @@ type Repository interface {
 	CleanupOutboundMail(context.Context, time.Time) error
 	SavePasswordReset(string, string, time.Time) error
 	SavePasswordResetContext(context.Context, string, string, time.Time) error
+	CreatePasswordResetForActiveUserContext(context.Context, string, string, time.Time) (User, error)
 	DeletePasswordReset(string) error
 	DeletePasswordResetContext(context.Context, string) error
 	ConsumePasswordReset(string, time.Time) (string, error)

@@ -56,7 +56,7 @@ func (s *Server) updateSite(w http.ResponseWriter, r *http.Request) {
 		Keywords    string `json:"keywords"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	updated, changed, err := s.app.UpdateSiteWithChangeContext(r.Context(), store.Site{Name: input.Name, URL: input.URL, AdminMail: input.AdminMail, Timezone: input.Timezone, Description: input.Description, Keywords: input.Keywords})
@@ -108,7 +108,7 @@ func (s *Server) updateReading(w http.ResponseWriter, r *http.Request) {
 		CommentsThreaded          bool `json:"commentsThreaded"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	updated, changed, err := s.app.UpdateReadingWithChangeContext(r.Context(), service.ReadingInput{
@@ -152,7 +152,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	var input accountRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	admin, changed, passwordChanged, err := s.app.UpdateAdminAccountWithChangeContext(r.Context(), service.AccountInput{
@@ -216,7 +216,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var input userRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	user, err := s.app.CreateUserContext(r.Context(), service.UserInput{Username: input.Username, Email: input.Email, Password: input.Password, Role: input.Role})
@@ -242,7 +242,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var input userRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	user, changed, err := s.app.UpdateUserWithChangeContext(r.Context(), r.PathValue("username"), service.UserInput{Email: input.Email, Password: input.Password, Role: input.Role, Active: input.Active})

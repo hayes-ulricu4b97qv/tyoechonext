@@ -59,7 +59,15 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 			http.NotFound(w, r)
 			return
 		}
-		post, err := s.app.GetPostContext(r.Context(), slug, s.canEditContent(r))
+		canEdit, err := s.contentEditorAccess(r.Context(), r)
+		if r.Context().Err() != nil {
+			return
+		}
+		if err != nil {
+			s.writeRepositoryUnavailable(w, r, err)
+			return
+		}
+		post, err := s.app.GetPostContext(r.Context(), slug, canEdit)
 		if err != nil && r.Context().Err() != nil {
 			return
 		}
@@ -93,7 +101,15 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 			http.NotFound(w, r)
 			return
 		}
-		page, err := s.app.GetPageContext(r.Context(), slug, s.canEditContent(r))
+		canEdit, err := s.contentEditorAccess(r.Context(), r)
+		if r.Context().Err() != nil {
+			return
+		}
+		if err != nil {
+			s.writeRepositoryUnavailable(w, r, err)
+			return
+		}
+		page, err := s.app.GetPageContext(r.Context(), slug, canEdit)
 		if err != nil && r.Context().Err() != nil {
 			return
 		}

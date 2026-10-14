@@ -82,6 +82,11 @@ func main() {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
 	<-maintenanceDone
+	backgroundCtx, cancelBackground := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancelBackground()
+	if err := server.WaitForBackgroundWork(backgroundCtx); err != nil {
+		logger.Warn("wait for background mail delivery", "error", err)
+	}
 }
 
 func maintainDailyCleanup(ctx context.Context, repository store.Repository, logger *slog.Logger) {

@@ -33,7 +33,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	var request setupRequest
 	if err := decodeJSON(w, r, &request); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	setup, err := s.app.InitializeContext(r.Context(), service.SetupInput{
@@ -89,7 +89,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	var request loginRequest
 	if err := decodeJSON(w, r, &request); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	key := s.clientHost(r)

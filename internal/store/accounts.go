@@ -70,7 +70,13 @@ func (r *SQLiteRepository) UpdateAdmin(admin Admin) error {
 }
 
 func (r *SQLiteRepository) UpdateAdminContext(ctx context.Context, admin Admin) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE users SET password_hash = ?, email = ?, updated_at = ? WHERE role = 'owner' AND username = ?`, admin.PasswordHash, admin.Email, formatTime(time.Now().UTC()), admin.Username)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin owner account update: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, email = ?, updated_at = ? WHERE role = 'owner' AND username = ?`, admin.PasswordHash, admin.Email, formatTime(time.Now().UTC()), admin.Username)
 	if err != nil {
 		return fmt.Errorf("update owner: %w", err)
 	}
@@ -80,6 +86,12 @@ func (r *SQLiteRepository) UpdateAdminContext(ctx context.Context, admin Admin) 
 	}
 	if affected == 0 {
 		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_resets WHERE username = ?`, admin.Username); err != nil {
+		return fmt.Errorf("revoke owner password reset tokens: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit owner account update: %w", err)
 	}
 	return nil
 }
@@ -109,6 +121,9 @@ func (r *SQLiteRepository) UpdateAdminAndRevokeOtherSessionsContext(ctx context.
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE (username = ? OR user_id = ?) AND token_hash <> ?`, admin.Username, admin.ID, exceptTokenHash); err != nil {
 		return fmt.Errorf("revoke other owner sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_resets WHERE username = ?`, admin.Username); err != nil {
+		return fmt.Errorf("revoke owner password reset tokens: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit owner account update: %w", err)
@@ -225,6 +240,9 @@ func (r *SQLiteRepository) UpdateUserContext(ctx context.Context, user User) (Us
 	if err != nil {
 		return User{}, fmt.Errorf("read updated user: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_resets WHERE username = ?`, user.Username); err != nil {
+		return User{}, fmt.Errorf("revoke user password reset tokens: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return User{}, fmt.Errorf("commit user update: %w", err)
 	}
@@ -262,6 +280,9 @@ func (r *SQLiteRepository) UpdateUserAndRevokeSessionsContext(ctx context.Contex
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE username = ? OR user_id = ?`, user.Username, user.ID); err != nil {
 		return User{}, fmt.Errorf("revoke user sessions: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_resets WHERE username = ?`, user.Username); err != nil {
+		return User{}, fmt.Errorf("revoke user password reset tokens: %w", err)
+	}
 	updated, err := scanUser(tx.QueryRowContext(ctx, `SELECT id, username, password_hash, email, role, active, created_at, updated_at FROM users WHERE id = ?`, user.ID))
 	if err != nil {
 		return User{}, fmt.Errorf("read updated user: %w", err)
@@ -277,18 +298,7 @@ func (r *SQLiteRepository) DeleteUser(username string) error {
 }
 
 func (r *SQLiteRepository) DeleteUserContext(ctx context.Context, username string) error {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM users WHERE username = ?`, username)
-	if err != nil {
-		return fmt.Errorf("delete user: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read deleted user count: %w", err)
-	}
-	if affected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return r.DeleteUserAndRevokeSessionsContext(ctx, username)
 }
 
 func (r *SQLiteRepository) DeleteUserAndRevokeSessions(username string) error {
@@ -315,6 +325,9 @@ func (r *SQLiteRepository) DeleteUserAndRevokeSessionsContext(ctx context.Contex
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE username = ? OR user_id = (SELECT id FROM users WHERE username = ?)`, username, username); err != nil {
 		return fmt.Errorf("revoke user sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_resets WHERE username = ?`, username); err != nil {
+		return fmt.Errorf("revoke user password reset tokens: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM users WHERE username = ? AND role <> 'owner'`, username)
 	if err != nil {

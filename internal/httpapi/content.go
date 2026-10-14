@@ -130,7 +130,7 @@ func (s *Server) createTerm(w http.ResponseWriter, r *http.Request) {
 	}
 	var input termRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	term, err := s.app.CreateTermContext(r.Context(), service.TermInput{Name: input.Name, Kind: input.Kind})
@@ -156,7 +156,7 @@ func (s *Server) updateTerm(w http.ResponseWriter, r *http.Request) {
 	}
 	var input termRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	term, changed, err := s.app.UpdateTermWithChangeContext(r.Context(), r.PathValue("id"), service.TermInput{Name: input.Name, Kind: input.Kind})
@@ -200,7 +200,15 @@ func (s *Server) deleteTerm(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getPost(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
-	post, err := s.app.GetPostContext(r.Context(), slug, s.canEditContent(r))
+	canEdit, err := s.contentEditorAccess(r.Context(), r)
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
+	post, err := s.app.GetPostContext(r.Context(), slug, canEdit)
 	if err != nil && r.Context().Err() != nil {
 		return
 	}
@@ -220,12 +228,20 @@ func (s *Server) getPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read neighboring posts")
 		return
 	}
-	withBody := s.app.RevealPost(post, s.canEditContent(r), r.Header.Get("X-Post-Passphrase"))
+	withBody := s.app.RevealPost(post, canEdit, r.Header.Get("X-Post-Passphrase"))
 	writeJSON(w, http.StatusOK, publicPostWithNeighbors(post, previous, next, withBody))
 }
 
 func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
-	page, err := s.app.GetPageContext(r.Context(), r.PathValue("slug"), s.canEditContent(r))
+	canEdit, err := s.contentEditorAccess(r.Context(), r)
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
+	page, err := s.app.GetPageContext(r.Context(), r.PathValue("slug"), canEdit)
 	if err != nil && r.Context().Err() != nil {
 		return
 	}
@@ -275,7 +291,7 @@ type commentRequest struct {
 func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 	var input commentRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if !s.allowComment(r) {
@@ -338,7 +354,7 @@ func (s *Server) updateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var input commentStatusRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	comment, changed, err := s.app.ModerateCommentContext(r.Context(), r.PathValue("id"), input.Status)
@@ -673,7 +689,7 @@ func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
 	}
 	var input postRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	post, err := input.post()
@@ -716,7 +732,7 @@ func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
 	}
 	var input postRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	nextPost, err := input.post()
@@ -769,7 +785,7 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var input pageRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	created, err := s.app.CreatePageContext(r.Context(), input.page())
@@ -807,7 +823,7 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 	}
 	var input pageRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		writeJSONDecodeError(w, err)
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	updated, changed, err := s.app.UpdatePageWithChangeContext(r.Context(), page.ID, input.page())
