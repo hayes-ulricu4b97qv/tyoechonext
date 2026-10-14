@@ -20,10 +20,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27.2"
+      - name: Go formatting
+        run: ./tasks.ps1 fmt-check
       - name: Go tests
         run: go test ./...
-      - name: Go race tests for HTTP and rate limiting
-        run: go test -race ./internal/service ./internal/httpapi
+      - name: Go race tests for service, store, and HTTP API
+        run: go test -race ./internal/service ./internal/store ./internal/httpapi
       - name: Go vet
         run: go vet ./...
       - name: Go vulnerability scan

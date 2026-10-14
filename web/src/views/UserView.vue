@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { listArchive, listPages, listPosts, listRecentComments } from '../api/content'
 import { setDocumentMeta } from '../meta'
 import PostDetailView from './PostDetailView.vue'
@@ -25,6 +25,8 @@ const archive = ref<MonthCount[]>([])
 const recentPosts = ref<Post[]>([])
 const recentComments = ref<Comment[]>([])
 const menuOpen = ref(false)
+const menuToggle = ref<HTMLButtonElement | null>(null)
+const menuRail = ref<HTMLElement | null>(null)
 const showTop = ref(false)
 const brandMark = computed(() => props.status.site?.name?.trim().slice(0, 1) || '博')
 
@@ -37,6 +39,36 @@ function closeMenu() {
   menuOpen.value = false
 }
 
+function menuFocusableElements() {
+  return Array.from(menuRail.value?.querySelectorAll<HTMLElement>(
+    'a[href], button:not(:disabled), input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+  ) ?? []).filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0)
+}
+
+async function openMenu() {
+  menuOpen.value = true
+  await nextTick()
+  ;(menuFocusableElements()[0] ?? menuRail.value)?.focus({ preventScroll: true })
+}
+
+async function closeMenuAndRestoreFocus() {
+  closeMenu()
+  await nextTick()
+  menuToggle.value?.focus({ preventScroll: true })
+}
+
+function toggleMenu() {
+  if (menuOpen.value) {
+    void closeMenuAndRestoreFocus()
+  } else {
+    void openMenu()
+  }
+}
+
+function onResize() {
+  if (menuOpen.value && window.innerWidth > 860) closeMenu()
+}
+
 function onScroll() {
   showTop.value = window.scrollY > 520
 }
@@ -47,8 +79,35 @@ function scrollTop() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.key === 'Tab' && menuOpen.value && window.innerWidth <= 860) {
+    const rail = menuRail.value
+    const focusable = menuFocusableElements()
+    if (!rail || focusable.length === 0) {
+      event.preventDefault()
+      rail?.focus({ preventScroll: true })
+      return
+    }
+
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    const active = document.activeElement
+    if (!rail.contains(active) || active === rail) {
+      event.preventDefault()
+      ;(event.shiftKey ? last : first).focus({ preventScroll: true })
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault()
+      last.focus({ preventScroll: true })
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault()
+      first.focus({ preventScroll: true })
+    }
+  }
+
   if (event.key === 'Escape') {
-    closeMenu()
+    if (menuOpen.value) {
+      void closeMenuAndRestoreFocus()
+      event.preventDefault()
+    }
     if (pagesDisclosure.value) pagesDisclosure.value.open = false
   }
 }
@@ -79,6 +138,7 @@ function loadMorePages() {
 onMounted(async () => {
   window.addEventListener('scroll', onScroll, { passive: true })
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('resize', onResize)
   if (!postSlug && !pageSlug) {
     const site = props.status.site
     setDocumentMeta(site?.name || '博客', site?.description ?? '', site?.keywords ?? '')
@@ -104,14 +164,15 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('scroll', onScroll)
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('resize', onResize)
 })
 </script>
 
 <template>
   <div class="public-shell" :class="{ 'menu-open': menuOpen }">
-    <a class="skip-link" href="#reader-main">跳到正文</a>
-    <header class="public-bar">
-      <button class="nav-toggle" type="button" :aria-expanded="menuOpen" aria-controls="reader-rail" @click="menuOpen = !menuOpen">{{ menuOpen ? '关闭目录' : '目录' }}</button>
+    <a class="skip-link" href="#reader-main" :inert="menuOpen">跳到正文</a>
+    <header class="public-bar" :inert="menuOpen">
+      <button ref="menuToggle" class="nav-toggle" type="button" :aria-expanded="menuOpen" aria-controls="reader-rail" @click="toggleMenu">{{ menuOpen ? '关闭目录' : '目录' }}</button>
       <a class="brand" href="/user">
         <span class="brand-mark">{{ brandMark }}</span>
         <span class="brand-copy">
@@ -133,9 +194,10 @@ onUnmounted(() => {
         <a href="/admin">管理</a>
       </nav>
     </header>
-    <div v-if="menuOpen" class="rail-backdrop" @click="closeMenu"></div>
+    <div v-if="menuOpen" class="rail-backdrop" aria-hidden="true" @click="closeMenuAndRestoreFocus"></div>
     <div class="public-frame">
-      <aside id="reader-rail" class="reader-rail" :class="{ 'is-open': menuOpen }" aria-label="归档与最新动态">
+      <aside ref="menuRail" id="reader-rail" class="reader-rail" :class="{ 'is-open': menuOpen }" :role="menuOpen ? 'dialog' : undefined" :aria-modal="menuOpen ? 'true' : undefined" aria-label="归档与最新动态" tabindex="-1">
+        <button class="reader-menu-close" type="button" @click="closeMenuAndRestoreFocus">关闭目录</button>
         <section aria-label="月份归档">
           <h2>归档 <span>{{ archive.length }}</span></h2>
           <a v-for="item in archive" :key="item.month" :href="`/user?month=${item.month}`" @click="closeMenu"><span>{{ monthLabel(item.month) }}</span><small>{{ item.count }}</small></a>
@@ -152,7 +214,7 @@ onUnmounted(() => {
           <p v-if="recentComments.length === 0" class="rail-empty">还没有已通过的评论</p>
         </section>
       </aside>
-      <main class="public-content">
+      <main class="public-content" :inert="menuOpen">
         <div id="reader-main" class="reader-main" tabindex="-1">
           <PageDetailView v-if="pageSlug" :status="status" />
           <PostDetailView v-else-if="postSlug" :status="status" />

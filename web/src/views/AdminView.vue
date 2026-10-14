@@ -22,7 +22,7 @@ import {
   savePost,
   updateTerm,
   uploadMedia as uploadMediaFile,
-  type PostRevision,
+  type PostRevisionSummary,
 } from '../api/content'
 import { setDocumentMeta } from '../meta'
 import { renderMarkdown } from '../markdown'
@@ -59,7 +59,10 @@ const loginLoading = ref(false)
 const showEditor = ref(false)
 const editor = reactive({ title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft' as 'draft' | 'published', publishAt: '', passphrase: '' })
 const customFieldRows = ref<Array<{ key: string; value: string }>>([])
-const revisions = ref<PostRevision[]>([])
+const revisions = ref<PostRevisionSummary[]>([])
+const revisionsPage = ref(0)
+const revisionsTotal = ref(0)
+const revisionsLoading = ref(false)
 const postContentInput = ref<HTMLTextAreaElement | null>(null)
 const previewHTML = computed(() => renderMarkdown(editor.content || ''))
 const editorError = ref('')
@@ -87,6 +90,7 @@ const showPagePreview = ref(false)
 const postListFilter = ref<'all' | 'published' | 'draft'>('all')
 const activeAnchor = ref('overview')
 let sectionObserver: IntersectionObserver | undefined
+let revisionRequestGeneration = 0
 const resetToken = ref('')
 const resetPasswordValue = ref('')
 const forgotMessage = ref('')
@@ -214,9 +218,15 @@ async function switchCommentStatus(status: 'pending' | 'approved' | 'spam') {
 }
 
 async function startEdit(post: Post) {
+  const generation = ++revisionRequestGeneration
   editorError.value = ''
+  revisions.value = []
+  revisionsPage.value = 0
+  revisionsTotal.value = 0
+  revisionsLoading.value = false
   try {
     const full = await getPost(post.slug)
+    if (generation !== revisionRequestGeneration) return
     editingId.value = full.id
     Object.assign(editor, {
       title: full.title,
@@ -231,13 +241,18 @@ async function startEdit(post: Post) {
       passphrase: '',
     })
     customFieldRows.value = Object.entries(full.customFields ?? {}).map(([key, value]) => ({ key, value }))
-    revisions.value = (await listRevisions(full.id)).items
+    const history = await listRevisions(full.id)
+    if (generation !== revisionRequestGeneration) return
+    revisions.value = history.items
+    revisionsPage.value = history.page
+    revisionsTotal.value = history.total
     showEditor.value = true
     showPreview.value = false
     await nextTick()
     document.getElementById('post-editor')?.scrollIntoView({ block: 'start', behavior: 'auto' })
     document.querySelector<HTMLInputElement>('#post-editor .editor-title')?.focus({ preventScroll: true })
   } catch (reason) {
+    if (generation !== revisionRequestGeneration) return
     editorError.value = reason instanceof ApiError ? reason.message : '无法打开文章'
     showEditor.value = true
   }
@@ -248,8 +263,13 @@ async function toggleEditor() {
     cancelEditor()
     return
   }
+  revisionRequestGeneration++
   editingId.value = null
   customFieldRows.value = []
+  revisions.value = []
+  revisionsPage.value = 0
+  revisionsTotal.value = 0
+  revisionsLoading.value = false
   showEditor.value = true
   showPreview.value = false
   await nextTick()
@@ -258,10 +278,14 @@ async function toggleEditor() {
 }
 
 function cancelEditor() {
+  revisionRequestGeneration++
   editingId.value = null
   showEditor.value = false
   showPreview.value = false
   revisions.value = []
+  revisionsPage.value = 0
+  revisionsTotal.value = 0
+  revisionsLoading.value = false
   customFieldRows.value = []
   Object.assign(editor, { title: '', slug: '', excerpt: '', content: '', categories: '', tags: '', allowComment: true, status: 'draft', publishAt: '', passphrase: '' })
   editorError.value = ''
@@ -490,18 +514,51 @@ function insertMedia(asset: Media, target: 'post' | 'page' = 'post') {
   })
 }
 
-async function restore(revision: PostRevision) {
-  if (!editingId.value) return
+async function restore(revision: PostRevisionSummary) {
+  const postId = editingId.value
+  if (!postId) return
+  const generation = ++revisionRequestGeneration
+  revisionsLoading.value = false
   editorError.value = ''
   try {
-    const restored = await restoreRevision(editingId.value, revision.id)
+    const restored = await restoreRevision(postId, revision.id)
+    if (generation !== revisionRequestGeneration || editingId.value !== postId) return
     editor.title = restored.title
     editor.excerpt = restored.excerpt
     editor.content = restored.content ?? ''
     customFieldRows.value = Object.entries(restored.customFields ?? {}).map(([key, value]) => ({ key, value }))
-    revisions.value = (await listRevisions(editingId.value)).items
+    const history = await listRevisions(postId)
+    if (generation !== revisionRequestGeneration || editingId.value !== postId) return
+    revisions.value = history.items
+    revisionsPage.value = history.page
+    revisionsTotal.value = history.total
   } catch (reason) {
+    if (generation !== revisionRequestGeneration) return
     editorError.value = reason instanceof ApiError ? reason.message : '恢复版本失败'
+  }
+}
+
+async function loadMoreRevisions() {
+  const postId = editingId.value
+  if (!postId || revisionsLoading.value || revisions.value.length >= revisionsTotal.value) return
+  const generation = revisionRequestGeneration
+  editorError.value = ''
+  revisionsLoading.value = true
+  try {
+    const history = await listRevisions(postId, revisionsPage.value + 1)
+    if (generation !== revisionRequestGeneration || editingId.value !== postId) return
+    if (history.items.length === 0) {
+      revisionsTotal.value = revisions.value.length
+      return
+    }
+    revisions.value.push(...history.items)
+    revisionsPage.value = history.page
+    revisionsTotal.value = history.total
+  } catch (reason) {
+    if (generation !== revisionRequestGeneration) return
+    editorError.value = reason instanceof ApiError ? reason.message : '无法加载更早的修订版本'
+  } finally {
+    if (generation === revisionRequestGeneration) revisionsLoading.value = false
   }
 }
 
@@ -669,10 +726,14 @@ onUnmounted(() => sectionObserver?.disconnect())
                 </div>
                 <small>字段名称最多 80 个字符，字段值最多 2,000 个字符；每篇文章最多 50 项。</small>
               </section>
-              <div v-if="revisions.length" class="taxonomy-list">
+              <div v-if="revisionsTotal" class="taxonomy-list">
                 <div v-for="revision in revisions" :key="revision.id" class="taxonomy-row">
                   <div><strong>{{ revision.title }}</strong><small>{{ new Date(revision.createdAt).toLocaleString('zh-CN') }}</small></div>
                   <button class="text-button" type="button" @click="restore(revision)">恢复此版本</button>
+                </div>
+                <div v-if="revisions.length < revisionsTotal" class="taxonomy-row">
+                  <small>已加载 {{ revisions.length }} / {{ revisionsTotal }} 个版本</small>
+                  <button class="text-button" type="button" :disabled="revisionsLoading" @click="loadMoreRevisions">{{ revisionsLoading ? '正在加载…' : '加载更早版本' }}</button>
                 </div>
               </div>
               <div class="editor-actions"><label class="editor-check"><input v-model="editor.allowComment" type="checkbox" />允许评论</label><select v-model="editor.status"><option value="draft">保存为草稿</option><option value="published">立即发布</option></select><p v-if="editorError" class="form-error">{{ editorError }}</p><button class="button button-dark">{{ editingId ? '保存修改' : '保存文章' }}</button></div>

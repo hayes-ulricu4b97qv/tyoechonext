@@ -19,6 +19,10 @@ func (s *Service) ListOutboundMail(page, pageSize int) (store.OutboundMailPage, 
 	return s.repo.ListOutboundMail(page, pageSize)
 }
 
+func (s *Service) ListOutboundMailContext(ctx context.Context, page, pageSize int) (store.OutboundMailPage, error) {
+	return s.repo.ListOutboundMailContext(ctx, page, pageSize)
+}
+
 // MailAvailable reports whether the service has a configured mailer.
 func (s *Service) MailAvailable() bool {
 	return s.mailer != nil
@@ -46,7 +50,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, username string) err
 	if s.mailer == nil {
 		return ErrMailUnavailable
 	}
-	user, err := s.repo.User(strings.TrimSpace(username))
+	user, err := s.repo.UserContext(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
@@ -62,10 +66,10 @@ func (s *Service) RequestPasswordReset(ctx context.Context, username string) err
 	}
 	token := hex.EncodeToString(tokenBytes)
 	expires := time.Now().UTC().Add(30 * time.Minute)
-	if err := s.repo.SavePasswordReset(user.Username, store.HashResetToken(token), expires); err != nil {
+	if err := s.repo.SavePasswordResetContext(ctx, user.Username, store.HashResetToken(token), expires); err != nil {
 		return err
 	}
-	site, err := s.repo.Site()
+	site, err := s.repo.SiteContext(ctx)
 	if err != nil {
 		_ = s.repo.DeletePasswordReset(store.HashResetToken(token))
 		return err
@@ -85,27 +89,32 @@ func (s *Service) RequestPasswordReset(ctx context.Context, username string) err
 }
 
 func (s *Service) ResetPassword(token, newPassword string) error {
+	return s.ResetPasswordContext(context.Background(), token, newPassword)
+}
+
+func (s *Service) ResetPasswordContext(ctx context.Context, token, newPassword string) error {
 	if len(newPassword) < 8 {
 		return fmt.Errorf("%w: 密码至少 8 个字符", ErrValidation)
 	}
 	if err := validateBcryptInput(newPassword, "密码"); err != nil {
 		return err
 	}
-	username, err := s.repo.ConsumePasswordReset(store.HashResetToken(strings.TrimSpace(token)), time.Now().UTC())
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	user, err := s.repo.User(username)
-	if err != nil {
+	tokenHash := store.HashResetToken(strings.TrimSpace(token))
+	if err := s.repo.CheckPasswordResetContext(ctx, tokenHash, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-	user.PasswordHash = string(hash)
-	if _, err := s.repo.UpdateUser(user); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.RevokeUserSessions(username)
+	return s.repo.CompletePasswordReset(ctx, tokenHash, time.Now().UTC(), string(hash))
 }

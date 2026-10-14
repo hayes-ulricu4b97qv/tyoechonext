@@ -150,18 +150,23 @@ export function listModerationComments(status: 'pending' | 'approved' | 'spam', 
   return api<CommentPage>(`/api/v1/content/comments?${params.toString()}`)
 }
 
-export interface PostRevision {
+export interface PostRevisionSummary {
   id: string
   postId: string
   title: string
-  excerpt: string
-  content: string
-  customFields?: Record<string, string>
   createdAt: string
 }
 
-export function listRevisions(id: string) {
-  return api<{ items: PostRevision[] }>(`/api/v1/content/posts/${segment(id)}/revisions`)
+export interface PostRevisionPage {
+  items: PostRevisionSummary[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export function listRevisions(id: string, page = 1, pageSize = 20) {
+  const params = pageQuery(page, pageSize)
+  return api<PostRevisionPage>(`/api/v1/content/posts/${segment(id)}/revisions?${params.toString()}`)
 }
 
 export function restoreRevision(postId: string, revisionId: string) {

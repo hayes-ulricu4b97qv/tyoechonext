@@ -23,13 +23,13 @@ func (s *Server) renderServerPostList(r *http.Request, site *store.Site) string 
 	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
 	month := strings.TrimSpace(r.URL.Query().Get("month"))
-	posts, err := s.app.ListPostsByTerms(search, category, tag, month, "", false, "", page, pageSize)
+	posts, err := s.app.ListPostsByTermsContext(r.Context(), search, category, tag, month, "", false, "", page, pageSize)
 	if err != nil {
 		return `<main class="public-content"><h1>` + html.EscapeString(site.Name) + `</h1><div class="empty-state empty-error">文章加载失败，请检查筛选条件后重试。</div></main>`
 	}
 	if posts.Total > 0 && page > frontendTotalPages(posts.Total, pageSize) {
 		page = frontendTotalPages(posts.Total, pageSize)
-		posts, err = s.app.ListPostsByTerms(search, category, tag, month, "", false, "", page, pageSize)
+		posts, err = s.app.ListPostsByTermsContext(r.Context(), search, category, tag, month, "", false, "", page, pageSize)
 		if err != nil {
 			return `<main class="public-content"><h1>` + html.EscapeString(site.Name) + `</h1><div class="empty-state empty-error">文章加载失败，请检查筛选条件后重试。</div></main>`
 		}

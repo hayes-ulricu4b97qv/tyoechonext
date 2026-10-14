@@ -13,8 +13,11 @@ func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	stats, err := s.app.Stats()
+	stats, err := s.app.StatsContext(r.Context())
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read post stats")
 		return
 	}
@@ -25,7 +28,10 @@ func (s *Server) getSite(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r) {
 		return
 	}
-	site, err := s.app.Site()
+	site, err := s.app.SiteContext(r.Context())
+	if err != nil && r.Context().Err() != nil {
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) || site == nil {
 		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
 		return
@@ -53,8 +59,11 @@ func (s *Server) updateSite(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, err)
 		return
 	}
-	updated, err := s.app.UpdateSite(store.Site{Name: input.Name, URL: input.URL, AdminMail: input.AdminMail, Timezone: input.Timezone, Description: input.Description, Keywords: input.Keywords})
+	updated, changed, err := s.app.UpdateSiteWithChangeContext(r.Context(), store.Site{Name: input.Name, URL: input.URL, AdminMail: input.AdminMail, Timezone: input.Timezone, Description: input.Description, Keywords: input.Keywords})
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
 			return
@@ -63,7 +72,9 @@ func (s *Server) updateSite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, err.Error())
 		return
 	}
-	s.recordAudit(r, "site.updated", "site", "1", nil)
+	if changed {
+		s.recordAudit(r, "site.updated", "site", "1", nil)
+	}
 	writeJSON(w, http.StatusOK, publicSite(updated))
 }
 
@@ -71,7 +82,10 @@ func (s *Server) getReading(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r) {
 		return
 	}
-	site, err := s.app.Site()
+	site, err := s.app.SiteContext(r.Context())
+	if err != nil && r.Context().Err() != nil {
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) || site == nil {
 		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
 		return
@@ -97,13 +111,16 @@ func (s *Server) updateReading(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, err)
 		return
 	}
-	updated, err := s.app.UpdateReading(service.ReadingInput{
+	updated, changed, err := s.app.UpdateReadingWithChangeContext(r.Context(), service.ReadingInput{
 		PostsPerPage:              input.PostsPerPage,
 		CommentsEnabled:           input.CommentsEnabled,
 		CommentsRequireModeration: input.CommentsRequireModeration,
 		CommentsThreaded:          input.CommentsThreaded,
 	})
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
 			return
@@ -112,12 +129,14 @@ func (s *Server) updateReading(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, err.Error())
 		return
 	}
-	s.recordAudit(r, "site.reading_updated", "site", "1", map[string]string{
-		"postsPerPage":      strconv.Itoa(updated.PostsPerPage),
-		"commentsEnabled":   strconv.FormatBool(updated.CommentsEnabled),
-		"requireModeration": strconv.FormatBool(updated.CommentsRequireModeration),
-		"threaded":          strconv.FormatBool(updated.CommentsThreaded),
-	})
+	if changed {
+		s.recordAudit(r, "site.reading_updated", "site", "1", map[string]string{
+			"postsPerPage":      strconv.Itoa(updated.PostsPerPage),
+			"commentsEnabled":   strconv.FormatBool(updated.CommentsEnabled),
+			"requireModeration": strconv.FormatBool(updated.CommentsRequireModeration),
+			"threaded":          strconv.FormatBool(updated.CommentsThreaded),
+		})
+	}
 	writeJSON(w, http.StatusOK, publicReading(updated))
 }
 
@@ -136,13 +155,16 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, err)
 		return
 	}
-	admin, err := s.app.UpdateAdminAccount(service.AccountInput{
+	admin, changed, passwordChanged, err := s.app.UpdateAdminAccountWithChangeContext(r.Context(), service.AccountInput{
 		Email:           input.Email,
 		CurrentPassword: input.CurrentPassword,
 		NewPassword:     input.NewPassword,
 		SessionToken:    sessionToken(r),
 	})
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		switch {
 		case errors.Is(err, service.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Current password is incorrect")
@@ -155,7 +177,9 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.recordAudit(r, "account.updated", "user", admin.Username, map[string]string{"passwordChanged": strconv.FormatBool(input.NewPassword != "")})
+	if changed {
+		s.recordAudit(r, "account.updated", "user", admin.Username, map[string]string{"passwordChanged": strconv.FormatBool(passwordChanged)})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": publicUser(admin)})
 }
 
@@ -171,8 +195,11 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r) {
 		return
 	}
-	users, err := s.app.ListUsers()
+	users, err := s.app.ListUsersContext(r.Context())
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read users")
 		return
 	}
@@ -192,8 +219,11 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, err)
 		return
 	}
-	user, err := s.app.CreateUser(service.UserInput{Username: input.Username, Email: input.Email, Password: input.Password, Role: input.Role})
+	user, err := s.app.CreateUserContext(r.Context(), service.UserInput{Username: input.Username, Email: input.Email, Password: input.Password, Role: input.Role})
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "username_taken", "用户名已被使用")
 			return
@@ -215,13 +245,18 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, err)
 		return
 	}
-	user, err := s.app.UpdateUser(r.PathValue("username"), service.UserInput{Email: input.Email, Password: input.Password, Role: input.Role, Active: input.Active})
+	user, changed, err := s.app.UpdateUserWithChangeContext(r.Context(), r.PathValue("username"), service.UserInput{Email: input.Email, Password: input.Password, Role: input.Role, Active: input.Active})
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
 		return
 	}
-	s.recordAudit(r, "user.updated", "user", user.ID, map[string]string{"username": user.Username, "role": user.Role, "active": strconv.FormatBool(user.Active)})
+	if changed {
+		s.recordAudit(r, "user.updated", "user", user.ID, map[string]string{"username": user.Username, "role": user.Role, "active": strconv.FormatBool(user.Active)})
+	}
 	writeJSON(w, http.StatusOK, publicUserRecord(*user))
 }
 
@@ -229,15 +264,21 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r) {
 		return
 	}
-	if err := s.app.DeleteUser(r.PathValue("username")); errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not_found", "User not found")
-	} else if err != nil {
+	err := s.app.DeleteUserContext(r.Context(), r.PathValue("username"))
+	if err != nil && r.Context().Err() != nil {
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
 		status, code := serviceError(err)
 		writeError(w, status, code, err.Error())
-	} else {
-		s.recordAudit(r, "user.deleted", "user", r.PathValue("username"), nil)
-		w.WriteHeader(http.StatusNoContent)
+		return
 	}
+	s.recordAudit(r, "user.deleted", "user", r.PathValue("username"), nil)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
@@ -248,8 +289,11 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	events, err := s.app.ListAudit(r.URL.Query().Get("action"), r.URL.Query().Get("resourceType"), page, pageSize)
+	events, err := s.app.ListAuditContext(r.Context(), r.URL.Query().Get("action"), r.URL.Query().Get("resourceType"), page, pageSize)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read audit events")
 		return
 	}

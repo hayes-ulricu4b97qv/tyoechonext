@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,11 +10,15 @@ import (
 )
 
 func (s *Service) ListComments(postKey string, includePending bool, page, pageSize int) (store.CommentPage, error) {
-	post, err := s.GetPost(postKey, includePending)
+	return s.ListCommentsContext(context.Background(), postKey, includePending, page, pageSize)
+}
+
+func (s *Service) ListCommentsContext(ctx context.Context, postKey string, includePending bool, page, pageSize int) (store.CommentPage, error) {
+	post, err := s.GetPostContext(ctx, postKey, includePending)
 	if err != nil {
 		return store.CommentPage{}, err
 	}
-	return s.repo.ListComments(store.CommentQuery{
+	return s.repo.ListCommentsContext(ctx, store.CommentQuery{
 		PostID:         post.ID,
 		IncludePending: includePending,
 		Page:           page,
@@ -22,6 +27,10 @@ func (s *Service) ListComments(postKey string, includePending bool, page, pageSi
 }
 
 func (s *Service) RecentApprovedComments(page, pageSize int) (store.CommentPage, error) {
+	return s.RecentApprovedCommentsContext(context.Background(), page, pageSize)
+}
+
+func (s *Service) RecentApprovedCommentsContext(ctx context.Context, page, pageSize int) (store.CommentPage, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -30,7 +39,7 @@ func (s *Service) RecentApprovedComments(page, pageSize int) (store.CommentPage,
 	} else if pageSize > 100 {
 		pageSize = 100
 	}
-	return s.repo.ListComments(store.CommentQuery{
+	return s.repo.ListCommentsContext(ctx, store.CommentQuery{
 		Status:             "approved",
 		PublishedPostsOnly: true,
 		Page:               page,
@@ -39,25 +48,33 @@ func (s *Service) RecentApprovedComments(page, pageSize int) (store.CommentPage,
 }
 
 func (s *Service) ListAllComments(status string, page, pageSize int) (store.CommentPage, error) {
+	return s.ListAllCommentsContext(context.Background(), status, page, pageSize)
+}
+
+func (s *Service) ListAllCommentsContext(ctx context.Context, status string, page, pageSize int) (store.CommentPage, error) {
 	if status != "" && !validCommentStatus(status) {
 		return store.CommentPage{}, fmt.Errorf("%w: 评论状态只能是待审核、已通过或垃圾", ErrValidation)
 	}
-	return s.repo.ListComments(store.CommentQuery{Status: status, IncludePending: true, Page: page, PageSize: pageSize})
+	return s.repo.ListCommentsContext(ctx, store.CommentQuery{Status: status, IncludePending: true, Page: page, PageSize: pageSize})
 }
 
 func (s *Service) CreateComment(postKey string, input CommentInput) (store.Comment, error) {
-	post, err := s.GetPost(postKey, false)
+	return s.CreateCommentContext(context.Background(), postKey, input)
+}
+
+func (s *Service) CreateCommentContext(ctx context.Context, postKey string, input CommentInput) (store.Comment, error) {
+	post, err := s.GetPostContext(ctx, postKey, false)
 	if err != nil {
 		return store.Comment{}, err
 	}
-	site, err := s.repo.Site()
+	site, err := s.repo.SiteContext(ctx)
 	if err != nil {
 		return store.Comment{}, err
 	}
 	var parent *store.Comment
 	parentDepth := 0
 	if parentID := strings.TrimSpace(input.ParentID); parentID != "" {
-		found, err := s.repo.Comment(parentID)
+		found, err := s.repo.CommentContext(ctx, parentID)
 		if errors.Is(err, store.ErrNotFound) {
 			return store.Comment{}, fmt.Errorf("%w: 未找到要回复的评论", ErrValidation)
 		}
@@ -65,7 +82,7 @@ func (s *Service) CreateComment(postKey string, input CommentInput) (store.Comme
 			return store.Comment{}, err
 		}
 		parent = &found
-		parentDepth, err = s.commentDepth(found)
+		parentDepth, err = s.commentDepthContext(ctx, found)
 		if err != nil {
 			return store.Comment{}, err
 		}
@@ -74,7 +91,7 @@ func (s *Service) CreateComment(postKey string, input CommentInput) (store.Comme
 	if err != nil {
 		return store.Comment{}, err
 	}
-	saved, err := s.repo.SaveComment(comment)
+	saved, err := s.repo.SaveCommentContext(ctx, comment)
 	if err != nil {
 		return store.Comment{}, err
 	}
@@ -85,32 +102,55 @@ func (s *Service) CreateComment(postKey string, input CommentInput) (store.Comme
 	return saved, nil
 }
 
-func (s *Service) ModerateComment(id, status string) (store.Comment, error) {
-	if !validCommentStatus(status) {
-		return store.Comment{}, fmt.Errorf("%w: 评论状态只能是待审核、已通过或垃圾", ErrValidation)
+func (s *Service) ModerateComment(id, status string) (store.Comment, bool, error) {
+	return s.ModerateCommentContext(context.Background(), id, status)
+}
+
+func (s *Service) ModerateCommentContext(ctx context.Context, id, status string) (store.Comment, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return store.Comment{}, false, err
 	}
-	return s.repo.UpdateCommentStatus(id, status)
+	if !validCommentStatus(status) {
+		return store.Comment{}, false, fmt.Errorf("%w: 评论状态只能是待审核、已通过或垃圾", ErrValidation)
+	}
+	return s.repo.UpdateCommentStatusContext(ctx, id, status)
 }
 
 func (s *Service) DeleteComment(id string) error {
-	return s.repo.DeleteComment(id)
+	return s.DeleteCommentContext(context.Background(), id)
+}
+
+func (s *Service) DeleteCommentContext(ctx context.Context, id string) error {
+	return s.repo.DeleteCommentContext(ctx, id)
 }
 
 func (s *Service) ListMedia(page, pageSize int) (store.MediaPage, error) {
-	return s.repo.ListMedia(store.MediaQuery{Page: page, PageSize: pageSize})
+	return s.ListMediaContext(context.Background(), page, pageSize)
+}
+
+func (s *Service) ListMediaContext(ctx context.Context, page, pageSize int) (store.MediaPage, error) {
+	return s.repo.ListMediaContext(ctx, store.MediaQuery{Page: page, PageSize: pageSize})
 }
 
 func (s *Service) GetMedia(id string) (store.Media, error) {
 	return s.repo.Media(id)
 }
 
+func (s *Service) GetMediaContext(ctx context.Context, id string) (store.Media, error) {
+	return s.repo.MediaContext(ctx, id)
+}
+
 func (s *Service) RegisterMedia(media store.Media) (store.Media, error) {
+	return s.RegisterMediaContext(context.Background(), media)
+}
+
+func (s *Service) RegisterMediaContext(ctx context.Context, media store.Media) (store.Media, error) {
 	media.Filename = strings.TrimSpace(media.Filename)
 	media.ContentType = strings.TrimSpace(media.ContentType)
 	if media.Filename == "" || media.ContentType == "" || media.Size < 1 || media.StorageKey == "" {
 		return store.Media{}, fmt.Errorf("%w: 媒体信息不完整", ErrValidation)
 	}
-	return s.repo.SaveMedia(media)
+	return s.repo.SaveMediaContext(ctx, media)
 }
 
 func (s *Service) DeleteMedia(id string) error {

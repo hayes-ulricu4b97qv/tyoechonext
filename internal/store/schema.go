@@ -15,7 +15,10 @@ func NewSQLiteRepository(path string) (*SQLiteRepository, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
-	dsn := "file:" + filepath.ToSlash(path) + "?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on"
+	// Do not enable WAL until the database has passed schema validation. SQLite
+	// persists journal_mode, so applying it while opening an unknown database
+	// would modify a file that we are about to reject.
+	dsn := "file:" + filepath.ToSlash(path) + "?_busy_timeout=5000&_foreign_keys=on"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
@@ -27,27 +30,53 @@ func NewSQLiteRepository(path string) (*SQLiteRepository, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable database WAL mode: %w", err)
+	}
 	return repo, nil
 }
 
 func (r *SQLiteRepository) createSchema() error {
-	var version int
-	if err := r.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		return fmt.Errorf("read database schema version: %w", err)
-	}
-	var existingTables int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'`).Scan(&existingTables); err != nil {
-		return fmt.Errorf("inspect database schema: %w", err)
-	}
-	if version != 0 && version != currentSchemaVersion || version == 0 && existingTables != 0 {
-		return fmt.Errorf("database schema version %d is unsupported; delete app.db and its -wal/-shm files to initialize a fresh database (expected version %d)", version, currentSchemaVersion)
-	}
-
 	tx, err := r.db.Begin()
 	if err != nil {
 		return fmt.Errorf("start schema creation: %w", err)
 	}
 	defer tx.Rollback()
+
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read database schema version: %w", err)
+	}
+	var existingTables int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'`).Scan(&existingTables); err != nil {
+		return fmt.Errorf("inspect database schema: %w", err)
+	}
+	if version == currentSchemaVersion {
+		if err := validateCurrentSchema(tx); err != nil {
+			return fmt.Errorf("validate database schema version %d: %w", version, err)
+		}
+		return tx.Commit()
+	}
+	if version != 0 {
+		return fmt.Errorf("unsupported database schema version %d (expected schema version %d); the database was not modified", version, currentSchemaVersion)
+	}
+	legacy := existingTables != 0
+	if legacy {
+		recognized, err := isRecognizedLegacySchema(tx)
+		if err != nil {
+			return fmt.Errorf("inspect legacy database schema: %w", err)
+		}
+		if !recognized {
+			return fmt.Errorf("unrecognized unversioned database; the database was not modified. Back it up, open it with its matching application version, or configure an empty APP_DATA_DIR")
+		}
+		if err := addLegacyColumns(tx); err != nil {
+			return fmt.Errorf("upgrade legacy database columns: %w", err)
+		}
+		if err := normalizeLegacyTimestamps(tx); err != nil {
+			return fmt.Errorf("normalize legacy database timestamps: %w", err)
+		}
+	}
 
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS sites (
@@ -198,6 +227,9 @@ func (r *SQLiteRepository) createSchema() error {
 		if _, err := tx.Exec(statement); err != nil {
 			return fmt.Errorf("create database schema: %w", err)
 		}
+	}
+	if err := validateCurrentSchema(tx); err != nil {
+		return fmt.Errorf("validate new database schema: %w", err)
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion)); err != nil {
 		return fmt.Errorf("set database schema version: %w", err)

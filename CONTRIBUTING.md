@@ -11,7 +11,7 @@ Describe what you did, the request you sent, and the result you expected. A fail
 
 * Read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before sending a change.
 * Read [docs/architecture.md](docs/architecture.md) for the module boundaries and the public routes.
-* Go changes belong under `cmd/` and `internal/`. Run `go test ./...` from the repository root.
+* Go changes belong under `cmd/` and `internal/`. Keep Go files formatted with `./tasks.ps1 fmt-check`, then run `go test ./...` from the repository root.
 * Vue changes belong under `web/`. From that directory, run `npm run build`.
 * For browser acceptance tests, run `npm run test:e2e` from `web/` on Windows with Microsoft Edge installed. Tests build the application and use temporary data; reports are written to `.e2e-artifacts/`.
 * Keep the public routes stable: `/setting`, `/admin`, `/user`, `/user/{slug}`, `/page/{slug}`, `/api/v1`, `/feed.xml`, `/healthz`, and `/readyz`.

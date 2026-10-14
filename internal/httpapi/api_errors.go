@@ -1,18 +1,23 @@
 package httpapi
 
 import (
+	"mime"
 	"net/http"
 	"strings"
 )
 
 func apiErrorEnvelope(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1" && !strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		if !isVersionedAPIPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		next.ServeHTTP(&apiErrorWriter{ResponseWriter: w}, r)
 	})
+}
+
+func isVersionedAPIPath(path string) bool {
+	return path == "/api/v1" || strings.HasPrefix(path, "/api/v1/")
 }
 
 type apiErrorWriter struct {
@@ -30,8 +35,10 @@ func (w *apiErrorWriter) WriteHeader(status int) {
 		return
 	}
 	w.wrote = true
+	mediaType, _, mediaTypeErr := mime.ParseMediaType(w.Header().Get("Content-Type"))
+	isJSON := mediaTypeErr == nil && strings.EqualFold(mediaType, "application/json")
 	if (status == http.StatusNotFound || status == http.StatusMethodNotAllowed) &&
-		!strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		!isJSON {
 		code, message := "not_found", "Not found"
 		if status == http.StatusMethodNotAllowed {
 			code, message = "method_not_allowed", "Method not allowed"

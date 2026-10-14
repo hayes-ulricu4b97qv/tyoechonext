@@ -14,7 +14,7 @@ Windows is the only supported development and deployment platform.
 - `/api/v1` — versioned JSON API
 - `/healthz` / `/readyz` — liveness and readiness checks
 
-The service redirects every page to `/setting` until setup creates the site and the owner account. Runtime data is stored in SQLite at `APP_DATA_DIR/app.db`. Opening an empty data directory creates a database with the current schema. The application does not migrate older database versions; see the operations guide before replacing a database.
+The service redirects every page to `/setting` until setup creates the site and the owner account. Runtime data is stored in SQLite at `APP_DATA_DIR/app.db`. Opening an empty data directory creates a database with the current schema. The application can upgrade databases created by the earlier Go versions when their migration history and schema match the supported legacy format. It refuses unknown or unsupported databases without changing their contents; see the operations guide before upgrading or replacing a database. Importing old PHP or `app.json` data is not supported.
 
 ## Quick start
 
@@ -55,7 +55,7 @@ Content editors can create independent pages through `GET/POST /api/v1/content/p
 When editing an article without a slug, the existing permalink is preserved; only new articles derive a slug from the title. Automatic slugs preserve Unicode letters and digits, so non-Latin titles and taxonomy names keep stable readable URLs.
 Editors can preview drafts from the admin list; draft routes remain unavailable to anonymous readers.
 
-Go serves `/feed.xml` from published posts only. Each item uses the post's published time, and the description is the excerpt or a truncated body. `/sitemap.xml` lists the reader home, published posts, published terms, and published pages. `/robots.txt` allows `/`, disallows `/admin` and `/setting`, and adds a `Sitemap` line when the site URL is set.
+Go serves `/feed.xml` from published posts only. Each item uses the post's published time, and the description is the excerpt or a truncated body. The feed is encoded page by page to keep server memory independent of the total post count. `/sitemap.xml` lists the reader home, published posts, published terms, and published pages. `/robots.txt` allows `/`, disallows `/admin` and `/setting`, and adds a `Sitemap` line when the site URL is set.
 
 Owner accounts can inspect management history through `GET /api/v1/audit`; successful content, media, comment, user, account, and site changes record the actor and resource.
 Write requests use a double-submit CSRF token; the Vue API client copies the token from the non-HttpOnly cookie into `X-CSRF-Token`. Initial setup and login are the only unauthenticated write entry points that do not require a prior token.

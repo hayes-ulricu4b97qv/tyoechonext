@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -19,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/config"
@@ -31,14 +34,16 @@ const (
 		"form-action 'self'; frame-ancestors 'none'; script-src 'self'; " +
 		"style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; connect-src 'self'"
 	// maxJSONBody is large enough for one post or page document whose body
-	// is a single rune past the documented maximum. UTF-8 uses at most 4
-	// bytes per rune, and encoding/json may escape a rune as \uXXXX.
+	// is a single rune past the documented maximum. A supplementary rune can
+	// be represented by two JSON Unicode escapes (12 bytes); other limits use
+	// the same conservative allowance.
 	// The extra rune lets validation, rather than the transport limit,
 	// reject an over-long body. The remaining allowance covers the other
 	// documented fields and JSON framing.
 	maxFieldRunes       = 200 + 120 + 500 + 20*60 + 20*60
 	maxCustomFieldRunes = 20_000
-	maxJSONBody         = (service.MaxContentRunes+1)*6 + (maxFieldRunes+maxCustomFieldRunes)*6 + 16*1024
+	maxJSONBytesPerRune = 12
+	maxJSONBody         = (service.MaxContentRunes+1)*maxJSONBytesPerRune + (maxFieldRunes+maxCustomFieldRunes)*maxJSONBytesPerRune + 16*1024
 	maxUploadSize       = 10 << 20
 	cookieName          = "app_session"
 	csrfCookie          = "app_csrf"
@@ -49,6 +54,8 @@ var scalarAPIQueryParameters = []string{
 	"action", "category", "includeDraft", "includePending", "kind", "month", "order", "page", "pageSize", "q", "resourceType", "status", "tag",
 }
 
+var scalarReaderQueryParameters = []string{"category", "month", "page", "preview", "q", "tag"}
+
 type Server struct {
 	repo           store.Repository
 	app            *service.Service
@@ -56,6 +63,7 @@ type Server struct {
 	logger         *slog.Logger
 	webDir         string
 	mediaRoot      string
+	mediaDeleteMu  sync.Mutex
 	trustedProxies []*net.IPNet
 	loginFailures  *service.HitCounter
 	commentHits    *service.HitCounter
@@ -157,6 +165,15 @@ func (s *Server) Handler() http.Handler {
 	return requestLog(apiErrorEnvelope(s.routeGuard(mux)), s.logger)
 }
 
+func (s *Server) writeRepositoryUnavailable(w http.ResponseWriter, r *http.Request, err error) {
+	s.logger.Error("repository unavailable", "error", err)
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeError(w, http.StatusServiceUnavailable, "not_ready", "The content store is unavailable")
+		return
+	}
+	http.Error(w, "The content store is unavailable", http.StatusServiceUnavailable)
+}
+
 func (s *Server) routeGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -164,7 +181,8 @@ func (s *Server) routeGuard(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		if isVersionedAPIPath(r.URL.Path) {
+			w.Header().Set("Cache-Control", "no-store")
 			values, err := url.ParseQuery(r.URL.RawQuery)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, "invalid_request", "API 查询参数格式无效")
@@ -183,21 +201,44 @@ func (s *Server) routeGuard(next http.Handler) http.Handler {
 				}
 			}
 		}
+		if path.Clean(r.URL.Path) == "/user" {
+			values, err := url.ParseQuery(r.URL.RawQuery)
+			if err != nil {
+				http.Error(w, "请求参数格式无效", http.StatusBadRequest)
+				return
+			}
+			for _, key := range scalarReaderQueryParameters {
+				if len(values[key]) > 1 {
+					http.Error(w, fmt.Sprintf("查询参数 %s 只能指定一次", key), http.StatusBadRequest)
+					return
+				}
+			}
+		}
 		if isFrontendPath(r.URL.Path) && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "This page only supports GET and HEAD")
 			return
 		}
-		s.ensureCSRFCookie(w, r)
+		if shouldSetCSRFCookie(r.URL.Path) {
+			s.ensureCSRFCookie(w, r)
+		}
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/feed.xml" || r.URL.Path == "/sitemap.xml" || r.URL.Path == "/robots.txt" || r.URL.Path == "/api/v1/system/status" || r.URL.Path == "/api/v1/setup" || r.URL.Path == "/api/v1/auth/login" || strings.HasPrefix(r.URL.Path, "/assets/") || r.URL.Path == "/favicon.svg" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !s.repo.Initialized() {
-			if r.URL.Path == "/setting" || strings.HasPrefix(r.URL.Path, "/setting/") {
-				next.ServeHTTP(w, r)
-				return
-			}
+		initialized, err := s.repo.InitializedContext(r.Context())
+		if r.Context().Err() != nil {
+			return
+		}
+		if r.URL.Path == "/setting" || strings.HasPrefix(r.URL.Path, "/setting/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if err != nil {
+			s.writeRepositoryUnavailable(w, r, err)
+			return
+		}
+		if !initialized {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				writeError(w, http.StatusPreconditionRequired, "setup_required", "Complete the initial setup at /setting")
 				return
@@ -215,6 +256,10 @@ func (s *Server) routeGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func shouldSetCSRFCookie(path string) bool {
+	return path != "/favicon.svg" && !strings.HasPrefix(path, "/assets/") && !strings.HasPrefix(path, "/media/")
 }
 
 func (s *Server) ensureCSRFCookie(w http.ResponseWriter, r *http.Request) {
@@ -253,12 +298,19 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.settings.Version})
 }
 
-func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
-	if !s.repo.Initialized() {
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	initialized, err := s.repo.InitializedContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil || !initialized {
 		writeError(w, http.StatusServiceUnavailable, "not_ready", "Complete the initial setup before serving traffic")
 		return
 	}
-	if _, err := s.repo.Site(); err != nil {
+	if _, err := s.repo.SiteContext(r.Context()); err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "not_ready", "The content store is unavailable")
 		return
 	}
@@ -293,7 +345,10 @@ type rssGUID struct {
 }
 
 func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
-	site, err := s.app.Site()
+	site, err := s.app.SiteContext(r.Context())
+	if err != nil && r.Context().Err() != nil {
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) || site == nil {
 		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
 		return
@@ -305,14 +360,77 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 	baseURL := strings.TrimRight(site.URL, "/")
 	editor := s.canEditContent(r)
 	passphrase := r.Header.Get("X-Post-Passphrase")
-	items := make([]rssItem, 0)
-	for page := 1; ; page++ {
-		posts, err := s.app.ListPostsWithContent("", false, page, 100)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
+	posts, err := s.app.ListPostsForFeed(r.Context(), 1, 100)
+	if err != nil {
+		if r.Context().Err() != nil {
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.WriteString(w, xml.Header); err != nil {
+		s.logger.Debug("stop RSS response", "error", err)
+		return
+	}
+	encoder := xml.NewEncoder(w)
+	encoder.Indent("", "  ")
+	root := xml.StartElement{
+		Name: xml.Name{Local: "rss"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "version"}, Value: "2.0"}},
+	}
+	channel := xml.StartElement{Name: xml.Name{Local: "channel"}}
+	if err := encoder.EncodeToken(root); err != nil {
+		s.logger.Debug("stop RSS response", "error", err)
+		return
+	}
+	if err := encoder.EncodeToken(channel); err != nil {
+		s.logger.Debug("stop RSS response", "error", err)
+		return
+	}
+	channelFields := []struct {
+		name  string
+		value string
+	}{
+		{name: "title", value: site.Name},
+		{name: "link", value: baseURL},
+		{name: "description", value: feedDescription(site)},
+		{name: "lastBuildDate", value: time.Now().UTC().Format(time.RFC1123Z)},
+	}
+	for _, field := range channelFields {
+		if err := encodeRSSTextElement(encoder, field.name, field.value); err != nil {
+			s.logger.Debug("stop RSS response", "error", err)
+			return
+		}
+	}
+	if err := encoder.Flush(); err != nil {
+		s.logger.Debug("stop RSS response", "error", err)
+		return
+	}
+
+	for page := 1; ; page++ {
+		if err := r.Context().Err(); err != nil {
+			s.logger.Debug("stop RSS response", "error", err)
+			return
+		}
+		if page > 1 {
+			posts, err = s.app.ListPostsForFeed(r.Context(), page, 100)
+			if err != nil {
+				if r.Context().Err() != nil {
+					s.logger.Debug("stop RSS response", "error", err)
+					return
+				}
+				s.logger.Error("read published posts while streaming RSS", "page", page, "error", err)
+				return
+			}
+		}
 		for _, post := range posts.Items {
+			if err := r.Context().Err(); err != nil {
+				s.logger.Debug("stop RSS response", "error", err)
+				return
+			}
 			publishedAt := post.PublishedAt
 			if publishedAt.IsZero() {
 				publishedAt = post.UpdatedAt
@@ -322,117 +440,60 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 			if s.app.RevealPost(post, editor, passphrase) {
 				content = post.Content
 			}
-			items = append(items, rssItem{
-				Title:       post.Title,
+			item := rssItem{
+				Title:       sanitizeXMLText(post.Title),
 				Link:        permalink,
 				GUID:        rssGUID{Value: permalink, IsPermaLink: true},
-				Description: service.FeedBlurb(post.Excerpt, content),
+				Description: sanitizeXMLText(service.FeedBlurb(post.Excerpt, content)),
 				PubDate:     publishedAt.UTC().Format(time.RFC1123Z),
-			})
+			}
+			if err := encoder.EncodeElement(item, xml.StartElement{Name: xml.Name{Local: "item"}}); err != nil {
+				s.logger.Debug("stop RSS response", "error", err)
+				return
+			}
+			if err := encoder.Flush(); err != nil {
+				s.logger.Debug("stop RSS response", "error", err)
+				return
+			}
 		}
 		if len(posts.Items) == 0 || posts.PageSize <= 0 || len(posts.Items) < posts.PageSize {
 			break
 		}
 	}
-	feed := rssFeed{
-		Version: "2.0",
-		Channel: rssChannel{
-			Title:         site.Name,
-			Link:          baseURL,
-			Description:   feedDescription(site),
-			LastBuildDate: time.Now().UTC().Format(time.RFC1123Z),
-			Items:         items,
-		},
-	}
-	writeXML(w, http.StatusOK, "application/rss+xml; charset=utf-8", feed)
-}
-
-type sitemapURLSet struct {
-	XMLName xml.Name     `xml:"urlset"`
-	XMLNS   string       `xml:"xmlns,attr"`
-	URLs    []sitemapURL `xml:"url"`
-}
-
-type sitemapURL struct {
-	Location string `xml:"loc"`
-	LastMod  string `xml:"lastmod,omitempty"`
-}
-
-func (s *Server) sitemap(w http.ResponseWriter, _ *http.Request) {
-	site, err := s.app.Site()
-	if errors.Is(err, store.ErrNotFound) || site == nil {
-		writeError(w, http.StatusNotFound, "not_found", "Site settings not found")
+	if err := encoder.EncodeToken(channel.End()); err != nil {
+		s.logger.Debug("stop RSS response", "error", err)
 		return
 	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
+	if err := encoder.EncodeToken(root.End()); err != nil {
+		s.logger.Debug("stop RSS response", "error", err)
 		return
 	}
-	baseURL := strings.TrimRight(site.URL, "/")
-	urls := []sitemapURL{{Location: baseURL + "/user"}}
-	for page := 1; ; page++ {
-		posts, err := s.app.ListPosts("", false, page, 100)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published posts")
-			return
-		}
-		for _, post := range posts.Items {
-			lastMod := post.UpdatedAt
-			if lastMod.IsZero() {
-				lastMod = post.PublishedAt
-			}
-			entry := sitemapURL{Location: baseURL + "/user/" + url.PathEscape(post.Slug)}
-			if !lastMod.IsZero() {
-				entry.LastMod = lastMod.UTC().Format("2006-01-02")
-			}
-			urls = append(urls, entry)
-		}
-		if len(posts.Items) == 0 || posts.PageSize <= 0 || len(posts.Items) < posts.PageSize {
-			break
-		}
+	if err := encoder.Flush(); err != nil {
+		s.logger.Debug("stop RSS response", "error", err)
 	}
-	for page := 1; ; page++ {
-		terms, err := s.app.ListTerms("", "", false, page, 100)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published terms")
-			return
-		}
-		for _, term := range terms.Items {
-			entry := sitemapURL{Location: baseURL + "/user?" + term.Kind + "=" + url.QueryEscape(term.Slug)}
-			if !term.UpdatedAt.IsZero() {
-				entry.LastMod = term.UpdatedAt.UTC().Format("2006-01-02")
-			}
-			urls = append(urls, entry)
-		}
-		if len(terms.Items) == 0 || terms.PageSize <= 0 || len(terms.Items) < terms.PageSize {
-			break
-		}
-	}
-	for page := 1; ; page++ {
-		pages, err := s.app.ListPages("", false, page, 100)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read published pages")
-			return
-		}
-		for _, item := range pages.Items {
-			entry := sitemapURL{Location: baseURL + "/page/" + url.PathEscape(item.Slug)}
-			if !item.UpdatedAt.IsZero() {
-				entry.LastMod = item.UpdatedAt.UTC().Format("2006-01-02")
-			}
-			urls = append(urls, entry)
-		}
-		if len(pages.Items) == 0 || pages.PageSize <= 0 || len(pages.Items) < pages.PageSize {
-			break
-		}
-	}
-	writeXML(w, http.StatusOK, "application/xml; charset=utf-8", sitemapURLSet{
-		XMLNS: "http://www.sitemaps.org/schemas/sitemap/0.9",
-		URLs:  urls,
-	})
 }
 
-func (s *Server) robots(w http.ResponseWriter, _ *http.Request) {
-	site, err := s.app.Site()
+func encodeRSSTextElement(encoder *xml.Encoder, name, value string) error {
+	return encoder.EncodeElement(sanitizeXMLText(value), xml.StartElement{Name: xml.Name{Local: name}})
+}
+
+func sanitizeXMLText(value string) string {
+	return strings.Map(func(char rune) rune {
+		if char == '\t' || char == '\n' || char == '\r' ||
+			(char >= 0x20 && char <= 0xD7FF) ||
+			(char >= 0xE000 && char <= 0xFFFD) ||
+			(char >= 0x10000 && char <= 0x10FFFF) {
+			return char
+		}
+		return '\uFFFD'
+	}, value)
+}
+
+func (s *Server) robots(w http.ResponseWriter, r *http.Request) {
+	site, err := s.app.SiteContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site settings")
 		return
@@ -446,14 +507,25 @@ func (s *Server) robots(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, strings.Join(lines, "\n")+"\n")
 }
 
-func (s *Server) systemStatus(w http.ResponseWriter, _ *http.Request) {
-	site, err := s.app.Site()
+func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
+	site, err := s.app.SiteContext(r.Context())
+	if err != nil && r.Context().Err() != nil {
+		return
+	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read site status")
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
+	initialized, err := s.repo.InitializedContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
 		return
 	}
 	response := map[string]any{
-		"initialized": s.repo.Initialized(),
+		"initialized": initialized,
 		"version":     s.settings.Version,
 		"features":    []string{"content", "pages", "taxonomy", "comments", "discussion", "media", "users", "sessions", "settings", "feeds", "archive", "audit"},
 	}
@@ -568,9 +640,19 @@ func (s *Server) requireModerator(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
-	user, ok := s.currentAdmin(r)
-	if !ok {
+	user, err := s.authenticatedAdmin(r.Context(), r)
+	if r.Context().Err() != nil {
+		return false
+	}
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue")
+		return false
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return false
+	}
+	if r.Context().Err() != nil {
 		return false
 	}
 	for _, role := range roles {
@@ -592,25 +674,32 @@ func (s *Server) canEditContent(r *http.Request) bool {
 	return ok && (user.Role == "owner" || user.Role == "editor")
 }
 
-func (s *Server) canModerate(r *http.Request) bool {
-	user, ok := s.currentAdmin(r)
-	return ok && (user.Role == "owner" || user.Role == "moderator")
+func (s *Server) currentAdmin(r *http.Request) (*store.Admin, bool) {
+	return s.currentAdminContext(r.Context(), r)
 }
 
-func (s *Server) currentAdmin(r *http.Request) (*store.Admin, bool) {
+func (s *Server) currentAdminContext(ctx context.Context, r *http.Request) (*store.Admin, bool) {
+	admin, err := s.authenticatedAdmin(ctx, r)
+	return admin, err == nil
+}
+
+func (s *Server) authenticatedAdmin(ctx context.Context, r *http.Request) (*store.Admin, error) {
 	cookie, err := r.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
-		return nil, false
+		return nil, store.ErrNotFound
 	}
-	username, err := s.app.ResolveSession(cookie.Value, time.Now().UTC())
+	username, err := s.app.ResolveSessionContext(ctx, cookie.Value, time.Now().UTC())
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	admin, err := s.app.User(username)
-	if err != nil || admin == nil || admin.Username != username || !admin.Active {
-		return nil, false
+	admin, err := s.app.UserContext(ctx, username)
+	if err != nil {
+		return nil, err
 	}
-	return admin, true
+	if admin == nil || admin.Username != username || !admin.Active {
+		return nil, store.ErrNotFound
+	}
+	return admin, nil
 }
 
 func sessionToken(r *http.Request) string {
@@ -629,7 +718,13 @@ func (s *Server) recordAudit(r *http.Request, action, resourceType, resourceID s
 		ResourceID:    resourceID,
 		Details:       details,
 	}
-	if user, ok := s.currentAdmin(r); ok {
+	user, ok := s.currentAdmin(r)
+	if !ok && r.Context().Err() != nil {
+		// The mutation already succeeded; keep its audit actor accurate even
+		// when a disconnected client canceled the request context.
+		user, ok = s.currentAdminContext(context.Background(), r)
+	}
+	if ok {
 		event.ActorUserID = user.ID
 		event.ActorUsername = user.Username
 	}
@@ -639,16 +734,39 @@ func (s *Server) recordAudit(r *http.Request, action, resourceType, resourceID s
 }
 
 func (s *Server) issueSession(w http.ResponseWriter, username string) error {
+	return s.issueSessionContext(context.Background(), w, username)
+}
+
+func (s *Server) issueSessionContext(ctx context.Context, w http.ResponseWriter, username string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return err
 	}
 	token := hex.EncodeToString(tokenBytes)
 	expires := time.Now().Add(s.sessionTTL())
-	if err := s.app.CreateSession(username, token, expires); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_ = s.app.PurgeSessions(time.Now().UTC())
+	if err := s.app.CreateSessionContext(ctx, username, token, expires); err != nil {
+		return err
+	}
+	revokeUnissuedSession := func() {
+		if err := s.app.RevokeSession(token); err != nil {
+			s.logger.Warn("revoke sign-in session after canceled request failed", "error", err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		revokeUnissuedSession()
+		return err
+	}
+	_ = s.app.PurgeSessionsContext(ctx, time.Now().UTC())
+	if err := ctx.Err(); err != nil {
+		revokeUnissuedSession()
+		return err
+	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", Expires: expires, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.settings.CookieSecure})
 	return nil
 }
@@ -656,7 +774,11 @@ func (s *Server) issueSession(w http.ResponseWriter, username string) error {
 func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 	cleanPath := path.Clean(r.URL.Path)
 	if cleanPath == "/" {
-		if s.repo.Initialized() {
+		initialized, err := s.repo.InitializedContext(r.Context())
+		if r.Context().Err() != nil {
+			return
+		}
+		if err == nil && initialized {
 			http.Redirect(w, r, "/user", http.StatusTemporaryRedirect)
 		} else {
 			http.Redirect(w, r, "/setting", http.StatusTemporaryRedirect)
@@ -668,6 +790,11 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat(file); err != nil {
 			http.NotFound(w, r)
 			return
+		}
+		if cleanPath != "/favicon.svg" && isVersionedFrontendAsset(path.Base(cleanPath)) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
 		}
 		http.ServeFile(w, r, file)
 		return
@@ -692,6 +819,13 @@ func serviceError(err error) (int, string) {
 	return http.StatusInternalServerError, "save_failed"
 }
 
+func serviceReadError(err error) (int, string) {
+	if errors.Is(err, service.ErrValidation) {
+		return http.StatusUnprocessableEntity, "validation_error"
+	}
+	return http.StatusInternalServerError, "read_failed"
+}
+
 func (s *Server) readingPage(r *http.Request) (int, int, error) {
 	page, pageSize, err := pagination(r)
 	if err != nil {
@@ -700,8 +834,14 @@ func (s *Server) readingPage(r *http.Request) (int, int, error) {
 	if strings.TrimSpace(r.URL.Query().Get("pageSize")) != "" {
 		return page, pageSize, nil
 	}
-	site, err := s.app.Site()
-	if err != nil || site == nil || site.PostsPerPage < 1 || site.PostsPerPage > 50 {
+	site, err := s.app.SiteContext(r.Context())
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return page, pageSize, nil
+		}
+		return 0, 0, err
+	}
+	if site == nil || site.PostsPerPage < 1 || site.PostsPerPage > 50 {
 		return page, pageSize, nil
 	}
 	return page, site.PostsPerPage, nil
@@ -1085,11 +1225,36 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 	if len(contentTypes) != 1 {
 		return errors.New("Content-Type must be application/json")
 	}
-	mediaType, _, err := mime.ParseMediaType(contentTypes[0])
+	mediaType, parameters, err := mime.ParseMediaType(contentTypes[0])
 	if err != nil || !strings.EqualFold(mediaType, "application/json") {
 		return errors.New("Content-Type must be application/json")
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBody))
+	for name := range parameters {
+		if !strings.EqualFold(name, "charset") {
+			return errors.New("Content-Type must be application/json")
+		}
+	}
+	if charset, exists := parameters["charset"]; exists && !strings.EqualFold(charset, "utf-8") {
+		return errors.New("JSON Content-Type charset must be UTF-8")
+	}
+	reader := bufio.NewReader(http.MaxBytesReader(w, r.Body, maxJSONBody))
+	for {
+		first, err := reader.ReadByte()
+		if err != nil {
+			return fmt.Errorf("invalid JSON: %w", err)
+		}
+		if first == ' ' || first == '\t' || first == '\r' || first == '\n' {
+			continue
+		}
+		if first != '{' {
+			return errors.New("invalid JSON: request body must be an object")
+		}
+		if err := reader.UnreadByte(); err != nil {
+			return fmt.Errorf("invalid JSON: %w", err)
+		}
+		break
+	}
+	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
@@ -1163,6 +1328,12 @@ func requestLog(next http.Handler, logger *slog.Logger) http.Handler {
 		started := time.Now()
 		recorder := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "status", recorder.status, "duration_ms", time.Since(started).Milliseconds())
+		status := recorder.status
+		if !recorder.wrote && r.Context().Err() != nil {
+			// 499 is a log-only marker for a request canceled before a response
+			// was written; it is never sent as an HTTP response status.
+			status = 499
+		}
+		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", time.Since(started).Milliseconds())
 	})
 }

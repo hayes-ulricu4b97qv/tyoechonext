@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,25 +19,44 @@ type ReadingInput struct {
 }
 
 func (s *Service) UpdateReading(input ReadingInput) (*store.Site, error) {
+	updated, _, err := s.UpdateReadingWithChange(input)
+	return updated, err
+}
+
+func (s *Service) UpdateReadingWithChange(input ReadingInput) (*store.Site, bool, error) {
+	return s.UpdateReadingWithChangeContext(context.Background(), input)
+}
+
+func (s *Service) UpdateReadingWithChangeContext(ctx context.Context, input ReadingInput) (*store.Site, bool, error) {
 	if input.PostsPerPage < 1 || input.PostsPerPage > 50 {
-		return nil, fmt.Errorf("%w: 每页文章数必须是 1 到 50", ErrValidation)
+		return nil, false, fmt.Errorf("%w: 每页文章数必须是 1 到 50", ErrValidation)
 	}
-	current, err := s.repo.Site()
+	current, err := s.repo.SiteContext(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	original := *current
 	current.PostsPerPage = input.PostsPerPage
 	current.CommentsEnabled = input.CommentsEnabled
 	current.CommentsRequireModeration = input.CommentsRequireModeration
 	current.CommentsThreaded = input.CommentsThreaded
-	if err := s.repo.UpdateSite(*current); err != nil {
-		return nil, err
+	if sameSiteSettings(original, *current) {
+		return current, false, nil
 	}
-	return current, nil
+	if err := s.repo.UpdateReadingSettingsContext(ctx, *current); err != nil {
+		return nil, false, err
+	}
+	return current, true, nil
 }
 
 func (s *Service) commentDepth(comment store.Comment) (int, error) {
 	return commentDepthFrom(comment, s.repo.Comment)
+}
+
+func (s *Service) commentDepthContext(ctx context.Context, comment store.Comment) (int, error) {
+	return commentDepthFrom(comment, func(id string) (store.Comment, error) {
+		return s.repo.CommentContext(ctx, id)
+	})
 }
 
 func commentDepthFrom(comment store.Comment, lookup func(string) (store.Comment, error)) (int, error) {

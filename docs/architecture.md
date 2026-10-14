@@ -28,16 +28,17 @@ web/dist/            Vite 构建产物（运行前生成）
 | `/healthz` | 存活检查，初始化前也返回正常 |
 | `/readyz` | 就绪检查，初始化完成前返回 503 |
 
-服务启动时打开 `APP_DATA_DIR/app.db`。空数据库会在单个事务中创建当前完整 schema，并写入 `PRAGMA user_version`。项目不迁移旧版数据库；检测到无版本号的非空数据库或不支持的版本时会停止启动，并提示删除 `app.db` 及其 WAL/SHM 文件后重新初始化。没有初始化记录时，页面请求转到 `/setting`，初始化成功后才开放 `/admin` 和 `/user`。
+服务启动时打开 `APP_DATA_DIR/app.db`。空数据库会在单个事务中创建当前完整 schema，并写入 `PRAGMA user_version=2`。程序也会升级由早期 Go 版本创建、带有完整 `schema_migrations` 1–8 记录且基础表结构匹配的数据库：事务内补齐设置、评论、会话和自定义字段列，统一时间戳格式，再验证表列、类型、默认值、非空属性、主键、唯一约束及其冲突策略、外键、检查约束和关键索引定义并写入版本号。旧版 `ALTER TABLE` 未给部分新列添加的检查约束，仅在完整旧迁移台账匹配时作为兼容形状接受。数据与旧会话记录会保留；迁移失败（包括无效时间戳）会回滚。无版本号但不符合该旧 Go schema、迁移记录不完整、或 `user_version` 不受支持的数据库会在修改前拒绝启动。PHP 或 `app.json` 导入不在支持范围内。没有初始化记录时，页面请求转到 `/setting`，初始化成功后才开放 `/admin` 和 `/user`；检查初始化状态时若 SQLite 读取失败，API 返回 `503 not_ready`，普通前端页面也返回 `503`，不会伪装成尚未初始化。
 
-文章接口支持 `q`、`category`、`tag`、`month`、`order`、`status`、`page` 和 `pageSize` 参数。`order` 默认按 `published_at`，传入 `updated` 时按更新时间。`status` 可指定 `draft` 或 `published`；草稿筛选只向内容编辑者开放，并在 SQL 分页前应用，因此筛选总数与页码一致。显式传入 1 到 100 之外的 `pageSize` 会返回校验错误。公开接口只返回已发布且发布时间不晚于当前时刻的文章，内容编辑者也可以带 `includeDraft=true` 读取全部草稿和排期文章。文章列表只从 SQLite 读取摘要字段，不加载正文；详情接口和 RSS 才按需读取正文。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希、`users.id` 和过期时间，因此服务重启后，同一数据库上的登录会话仍然有效。会话寿命由 `APP_SESSION_TTL_MIN` 决定，缺省 1440 分钟。
+文章接口支持 `q`、`category`、`tag`、`month`、`order`、`status`、`page` 和 `pageSize` 参数。`order` 默认按 `published_at`，传入 `updated` 时按更新时间。`status` 可指定 `draft` 或 `published`；草稿筛选只向内容编辑者开放，并在 SQL 分页前应用，因此筛选总数与页码一致。显式传入 1 到 100 之外的 `pageSize` 会返回校验错误。公开接口只返回已发布且发布时间不晚于当前时刻的文章，内容编辑者也可以带 `includeDraft=true` 读取全部草稿和排期文章。文章列表只从 SQLite 读取摘要字段，不加载正文；详情接口读取完整正文，RSS 只从 SQLite 读取摘要或正文前 281 个字符。登录 cookie 只携带随机令牌，数据库中保存 SHA-256 哈希、`users.id` 和过期时间，因此服务重启后，同一数据库上的登录会话仍然有效。会话寿命由 `APP_SESSION_TTL_MIN` 决定，缺省 1440 分钟；鉴权读取只校验有效期，过期行由启动和每日维护任务清理。
 唯一键冲突统一转为 HTTP 409；文章、页面、分类/标签和用户名分别返回稳定的 `post_taken`、`page_taken`、`term_taken`、`username_taken` 错误码。错误分类依据 SQLite 约束码，不解析驱动错误文本。
 未知 `/api/v1` 路径和不支持的 HTTP 方法也返回统一的 `{error:{code,message}}` JSON；方法错误保留 `Allow` 响应头，便于客户端诊断路由问题。
+所有 `/api/v1/*` 响应和服务端渲染的 HTML shell 都带 `Cache-Control: no-store`，避免 owner 数据、会话信息或草稿预览被浏览器及共享缓存保留。公开媒体 URL 使用稳定 ID，并按一年不可变资源缓存；`/assets/` 下带 Vite 内容哈希的文件按一年不可变资源缓存，未版本化静态文件和 favicon 使用 `no-cache`。
 文章摘要列表将当前页文章的分类、标签和公开文章计数批量查询，避免对每篇文章单独读取关联。文章和页面搜索使用词元索引，并按字面匹配用户输入，`%` 与 `_` 不会被当作通配符；所有 `q` 参数最多接受 200 个 Unicode 字符，避免超长输入触发无界搜索工作。候选词元在一次分组查询中读取，分类和标签名称仍用带转义的 `LIKE`。
 
 读者端正文和管理端 Markdown 预览共用 `web/src/markdown.ts`，由 `marked` 转换并经 DOMPurify 净化后再写入 DOM。媒体插入保留编辑器中的光标或选区，可用于文章和独立页面。
 
-`/feed.xml` 只收录已发布文章，按发布时间排序，描述使用摘要或截断后的正文。`/sitemap.xml` 包含读者首页、已发布文章、公开分类与标签、已发布独立页面。`/robots.txt` 允许 `/`，禁止 `/admin` 和 `/setting`，站点 URL 存在时附上 `Sitemap`。Vue 用户端不生成这些文件。
+`/feed.xml` 只收录已发布文章，按发布时间排序，描述使用摘要或截断后的正文，并逐页编码输出以限制内存用量。公开文章、页面和词条列表，以及 RSS 与 Sitemap 的列表查询均把 HTTP 请求 context 传入 SQLite；客户端中止请求后会取消当前查询并停止后续编码。评论、媒体、用户、审计、修订历史、备份和月归档查询也使用请求 context；取消的读取不会继续生成错误响应或完成剩余归档工作。文章修订历史接口返回 `{items,total,page,pageSize}`，每页默认和最大均为 20 条；列表只发送版本 ID、文章 ID、标题和时间，编辑器按需加载更早的版本，恢复操作才读取对应正文快照。`/sitemap.xml` 包含读者首页、已发布文章、公开分类与标签、已发布独立页面；URL 超过 10,000 条时返回索引，并按每份最多 10,000 条提供分片。`/robots.txt` 允许 `/`，禁止 `/admin` 和 `/setting`，站点 URL 存在时附上 `Sitemap`。Vue 用户端不生成这些文件。
 
 审计事件写入 SQLite 的 `audit_events` 表，并通过 owner-only 的 `GET /api/v1/audit` 查询；文章、评论、媒体、用户、账户和站点的成功变更都会记录操作者、资源和必要的变更详情。
 
@@ -64,7 +65,7 @@ Vue 用户端会从公开词条接口生成筛选导航，页面链接与分类/
 
 所有者通过 `GET/PUT /api/v1/settings/reading` 管理阅读与评论：`postsPerPage`（1–50，公开文章列表未传 `pageSize` 时使用）、`commentsEnabled`、`commentsRequireModeration` 和 `commentsThreaded`。文章还可以单独设置 `allowComment`；站点或文章关闭评论时，创建评论会被拒绝。开启回复后，评论可以带 `parentId`，父评论必须是同一篇文章里已通过的评论，嵌套最多三层。公开状态接口会带上 `reading`，读者端据此分页、决定是否展示评论表单，并把回复按时间排成线程。
 
-所有者还可以在站点设置里保存 `description` 和 `keywords`。匿名公开状态会带回这两个字段。描述非空时，`/feed.xml` 的频道描述使用这段文字；描述为空时仍回退为站点名加 ` latest posts`。站点地址只接受 http(s) 协议和域名，可带末尾斜线，不接受路径、查询参数、片段或用户信息，因为本站链接和静态资源都从域名根路径提供。编辑和审核员不能修改站点字段。
+所有者还可以在站点设置里保存 `description` 和 `keywords`。匿名公开状态会带回这两个字段。描述非空时，`/feed.xml` 的频道描述使用这段文字；描述为空时仍回退为站点名加 ` latest posts`。站点地址只接受不超过 512 字节的 http(s) 协议和域名，可带末尾斜线，不接受路径、查询参数、片段或用户信息，因为本站链接和静态资源都从域名根路径提供。编辑和审核员不能修改站点字段。
 
 Go 服务在返回公开文章和独立页面的应用壳前，会把标题、摘要、GFM Markdown 正文和 Open Graph 元数据写入初始 HTML。Goldmark 默认安全渲染器不会输出原始 HTML 或危险链接；口令保护文章不会在初始 HTML 暴露正文。管理页与带 `preview=true` 的页面标记为 `noindex, nofollow`。
 
@@ -92,3 +93,7 @@ go run ./cmd/server
 ```
 
 开发时可以并行运行 `go run ./cmd/server` 与 `cd web && npm run dev`，Vite 会把 `/api` 代理到 `localhost:8080`。
+
+## DELETE 幂等性
+
+文章、页面、分类/标签、评论、媒体和职员用户的删除接口在资源已不存在或本次删除成功时都返回 `204 No Content`。只有实际删除成功才写审计事件；重试已完成的删除不会重复产生审计记录。

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -54,16 +55,20 @@ func containsLiteral(parts []string, search string) bool {
 }
 
 func replaceSearchTokens(tx *sql.Tx, kind, id string, parts ...string) error {
-	if _, err := tx.Exec(`DELETE FROM search_tokens WHERE kind = ? AND record_id = ?`, kind, id); err != nil {
+	return replaceSearchTokensContext(context.Background(), tx, kind, id, parts...)
+}
+
+func replaceSearchTokensContext(ctx context.Context, tx *sql.Tx, kind, id string, parts ...string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM search_tokens WHERE kind = ? AND record_id = ?`, kind, id); err != nil {
 		return fmt.Errorf("clear search tokens: %w", err)
 	}
-	statement, err := tx.Prepare(`INSERT INTO search_tokens(kind, token, record_id) VALUES (?, ?, ?)`)
+	statement, err := tx.PrepareContext(ctx, `INSERT INTO search_tokens(kind, token, record_id) VALUES (?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare search tokens: %w", err)
 	}
 	defer statement.Close()
 	for _, token := range searchTokens(parts...) {
-		if _, err := statement.Exec(kind, token, id); err != nil {
+		if _, err := statement.ExecContext(ctx, kind, token, id); err != nil {
 			return fmt.Errorf("write search token: %w", err)
 		}
 	}
@@ -71,13 +76,21 @@ func replaceSearchTokens(tx *sql.Tx, kind, id string, parts ...string) error {
 }
 
 func deleteSearchTokens(tx *sql.Tx, kind, id string) error {
-	if _, err := tx.Exec(`DELETE FROM search_tokens WHERE kind = ? AND record_id = ?`, kind, id); err != nil {
+	return deleteSearchTokensContext(context.Background(), tx, kind, id)
+}
+
+func deleteSearchTokensContext(ctx context.Context, tx *sql.Tx, kind, id string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM search_tokens WHERE kind = ? AND record_id = ?`, kind, id); err != nil {
 		return fmt.Errorf("delete search tokens: %w", err)
 	}
 	return nil
 }
 
 func (r *SQLiteRepository) recordIDsMatching(kind, search string) ([]string, error) {
+	return r.recordIDsMatchingContext(context.Background(), kind, search)
+}
+
+func (r *SQLiteRepository) recordIDsMatchingContext(ctx context.Context, kind, search string) ([]string, error) {
 	search = strings.TrimSpace(search)
 	if search == "" {
 		return nil, nil
@@ -92,7 +105,7 @@ func (r *SQLiteRepository) recordIDsMatching(kind, search string) ([]string, err
 		args = append(args, token)
 	}
 	args = append(args, len(tokens))
-	rows, err := r.db.Query(searchTokenCandidatesSQL(len(tokens)), args...)
+	rows, err := r.db.QueryContext(ctx, searchTokenCandidatesSQL(len(tokens)), args...)
 	if err != nil {
 		return nil, fmt.Errorf("search tokens: %w", err)
 	}
@@ -115,14 +128,14 @@ func (r *SQLiteRepository) recordIDsMatching(kind, search string) ([]string, err
 	if len(ids) == 0 {
 		return []string{}, nil
 	}
-	verified, err := r.filterLiteralMatches(kind, ids, search)
+	verified, err := r.filterLiteralMatchesContext(ctx, kind, ids, search)
 	if err != nil {
 		return nil, err
 	}
 	return verified, nil
 }
 
-func (r *SQLiteRepository) filterLiteralMatches(kind string, ids []string, search string) ([]string, error) {
+func (r *SQLiteRepository) filterLiteralMatchesContext(ctx context.Context, kind string, ids []string, search string) ([]string, error) {
 	if len(ids) == 0 {
 		return []string{}, nil
 	}
@@ -132,7 +145,7 @@ func (r *SQLiteRepository) filterLiteralMatches(kind string, ids []string, searc
 	}
 	clause, args := idInClause(ids)
 	query := `SELECT id, title, excerpt, slug, content FROM ` + table + ` WHERE ` + clause
-	rows, err := r.db.Query(query, args...)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read search candidates: %w", err)
 	}

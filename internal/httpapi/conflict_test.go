@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,11 +27,25 @@ func (r *conflictRepository) SavePost(post store.Post) (store.Post, error) {
 	return r.Repository.SavePost(post)
 }
 
+func (r *conflictRepository) SavePostContext(ctx context.Context, post store.Post) (store.Post, error) {
+	if r.conflictFor == "post" {
+		return store.Post{}, fmt.Errorf("save post: %w", store.ErrConflict)
+	}
+	return r.Repository.SavePostContext(ctx, post)
+}
+
 func (r *conflictRepository) SavePage(page store.Page) (store.Page, error) {
 	if r.conflictFor == "page" {
 		return store.Page{}, fmt.Errorf("save page: %w", store.ErrConflict)
 	}
 	return r.Repository.SavePage(page)
+}
+
+func (r *conflictRepository) SavePageContext(ctx context.Context, page store.Page) (store.Page, error) {
+	if r.conflictFor == "page" {
+		return store.Page{}, fmt.Errorf("save page: %w", store.ErrConflict)
+	}
+	return r.Repository.SavePageContext(ctx, page)
 }
 
 func (r *conflictRepository) SaveTerm(term store.Term) (store.Term, error) {
@@ -40,11 +55,25 @@ func (r *conflictRepository) SaveTerm(term store.Term) (store.Term, error) {
 	return r.Repository.SaveTerm(term)
 }
 
+func (r *conflictRepository) SaveTermWithChangeContext(ctx context.Context, term store.Term) (store.Term, bool, error) {
+	if r.conflictFor == "term" {
+		return store.Term{}, false, fmt.Errorf("save term: %w", store.ErrConflict)
+	}
+	return r.Repository.SaveTermWithChangeContext(ctx, term)
+}
+
 func (r *conflictRepository) CreateUser(user store.User) (store.User, error) {
 	if r.conflictFor == "user" {
 		return store.User{}, fmt.Errorf("create user: %w", store.ErrConflict)
 	}
 	return r.Repository.CreateUser(user)
+}
+
+func (r *conflictRepository) CreateUserContext(ctx context.Context, user store.User) (store.User, error) {
+	if r.conflictFor == "user" {
+		return store.User{}, fmt.Errorf("create user: %w", store.ErrConflict)
+	}
+	return r.Repository.CreateUserContext(ctx, user)
 }
 
 func TestUniqueConflictsUseStableResourceErrors(t *testing.T) {

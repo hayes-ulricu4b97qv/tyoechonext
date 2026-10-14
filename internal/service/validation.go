@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -16,8 +17,15 @@ import (
 )
 
 func (s *Service) uniqueSlug(raw, title, currentID string) (string, error) {
+	return s.uniqueSlugContext(context.Background(), raw, title, currentID)
+}
+
+func (s *Service) uniqueSlugContext(ctx context.Context, raw, title, currentID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	base := limitSlug(slugify(raw, title))
-	existing, err := s.repo.PostBySlug(base)
+	existing, err := s.repo.PostBySlugContext(ctx, base)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && existing.ID == currentID) {
 		return base, nil
 	}
@@ -25,8 +33,11 @@ func (s *Service) uniqueSlug(raw, title, currentID string) (string, error) {
 		return "", err
 	}
 	for suffix := 2; suffix < 10000; suffix++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		candidate := slugWithSuffix(base, suffix)
-		existing, err := s.repo.PostBySlug(candidate)
+		existing, err := s.repo.PostBySlugContext(ctx, candidate)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && existing.ID == currentID) {
 			return candidate, nil
 		}
@@ -38,8 +49,15 @@ func (s *Service) uniqueSlug(raw, title, currentID string) (string, error) {
 }
 
 func (s *Service) uniquePageSlug(raw, title, currentID string) (string, error) {
+	return s.uniquePageSlugContext(context.Background(), raw, title, currentID)
+}
+
+func (s *Service) uniquePageSlugContext(ctx context.Context, raw, title, currentID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	base := limitSlug(slugify(raw, title))
-	existing, err := s.repo.PageBySlug(base)
+	existing, err := s.repo.PageBySlugContext(ctx, base)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && existing.ID == currentID) {
 		return base, nil
 	}
@@ -47,8 +65,11 @@ func (s *Service) uniquePageSlug(raw, title, currentID string) (string, error) {
 		return "", err
 	}
 	for suffix := 2; suffix < 10000; suffix++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		candidate := slugWithSuffix(base, suffix)
-		existing, err := s.repo.PageBySlug(candidate)
+		existing, err := s.repo.PageBySlugContext(ctx, candidate)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && existing.ID == currentID) {
 			return candidate, nil
 		}
@@ -64,7 +85,7 @@ func validateSetup(input SetupInput) error {
 		return fmt.Errorf("%w: 站点名称需要 1 到 80 个字符", ErrValidation)
 	}
 	if !validSiteURL(input.SiteURL) {
-		return fmt.Errorf("%w: 站点地址只能包含 http 或 https 协议和域名", ErrValidation)
+		return fmt.Errorf("%w: 站点地址只能包含 http 或 https 协议和域名，且最多 512 字节", ErrValidation)
 	}
 	if !usernamePattern.MatchString(input.AdminUsername) {
 		return fmt.Errorf("%w: 用户名需要 3 到 32 个字符，只能使用字母、数字、_ 或 -", ErrValidation)
@@ -273,7 +294,11 @@ func validURL(raw string) bool {
 }
 
 func validSiteURL(raw string) bool {
-	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) == 0 || len(trimmed) > MaxSiteURLBytes {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(trimmed)
 	return err == nil &&
 		(parsed.Scheme == "http" || parsed.Scheme == "https") &&
 		parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" &&

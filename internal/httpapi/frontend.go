@@ -16,6 +16,9 @@ import (
 )
 
 func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath string) {
+	// This HTML is rendered from live site data and may contain authorized drafts.
+	// Never let a browser or shared intermediary retain a user-specific shell.
+	w.Header().Set("Cache-Control", "no-store")
 	raw, err := os.ReadFile(filepath.Join(s.webDir, "index.html"))
 	if err != nil {
 		http.NotFound(w, r)
@@ -25,13 +28,20 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 	description := ""
 	keywords := ""
 	var site *store.Site
-	if s.repo.Initialized() {
-		if loaded, err := s.app.Site(); err == nil && loaded != nil && strings.TrimSpace(loaded.Name) != "" {
+	initialized, err := s.repo.InitializedContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if err == nil && initialized {
+		if loaded, err := s.app.SiteContext(r.Context()); err == nil && loaded != nil && strings.TrimSpace(loaded.Name) != "" {
 			site = loaded
 			siteName = loaded.Name
 			description = strings.TrimSpace(loaded.Description)
 			keywords = strings.TrimSpace(loaded.Keywords)
 		}
+	}
+	if r.Context().Err() != nil {
+		return
 	}
 	title := siteName
 	body := "<h1>" + html.EscapeString(siteName) + "</h1>"
@@ -49,7 +59,10 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 			http.NotFound(w, r)
 			return
 		}
-		post, err := s.app.GetPost(slug, s.canEditContent(r))
+		post, err := s.app.GetPostContext(r.Context(), slug, s.canEditContent(r))
+		if err != nil && r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			http.NotFound(w, r)
 			return
@@ -80,7 +93,10 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 			http.NotFound(w, r)
 			return
 		}
-		page, err := s.app.GetPage(slug, s.canEditContent(r))
+		page, err := s.app.GetPageContext(r.Context(), slug, s.canEditContent(r))
+		if err != nil && r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			http.NotFound(w, r)
 			return
@@ -133,6 +149,9 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 	if strings.Contains(htmlText, marker) {
 		htmlText = strings.Replace(htmlText, marker, `<div id="app">`+body+`</div>`, 1)
 	}
+	if r.Context().Err() != nil {
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, htmlText)
@@ -166,4 +185,23 @@ func isFrontendPath(rawPath string) bool {
 		cleanPath == "/page" || strings.HasPrefix(cleanPath, "/page/") ||
 		cleanPath == "/setting" || strings.HasPrefix(cleanPath, "/setting/") ||
 		strings.HasPrefix(cleanPath, "/assets/")
+}
+
+func isVersionedFrontendAsset(name string) bool {
+	extension := path.Ext(name)
+	if extension == "" {
+		return false
+	}
+	stem := strings.TrimSuffix(name, extension)
+	const viteHashLength = 8
+	hashStart := len(stem) - viteHashLength
+	if hashStart <= 0 || stem[hashStart-1] != '-' {
+		return false
+	}
+	for _, char := range stem[hashStart:] {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-' || char == '_') {
+			return false
+		}
+	}
+	return true
 }

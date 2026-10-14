@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,10 @@ func (r *SQLiteRepository) RecordAudit(event AuditEvent) error {
 }
 
 func (r *SQLiteRepository) ListAudit(query AuditQuery) (AuditPage, error) {
+	return r.ListAuditContext(context.Background(), query)
+}
+
+func (r *SQLiteRepository) ListAuditContext(ctx context.Context, query AuditQuery) (AuditPage, error) {
 	query.Page, query.PageSize = normalizePage(query.Page, query.PageSize)
 	where := "1 = 1"
 	args := make([]any, 0, 2)
@@ -48,11 +53,11 @@ func (r *SQLiteRepository) ListAudit(query AuditQuery) (AuditPage, error) {
 		args = append(args, strings.TrimSpace(query.ResourceType))
 	}
 	var total int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE `+where, args...).Scan(&total); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events WHERE `+where, args...).Scan(&total); err != nil {
 		return AuditPage{}, fmt.Errorf("count audit events: %w", err)
 	}
 	offset := (query.Page - 1) * query.PageSize
-	rows, err := r.db.Query(`SELECT id, actor_user_id, actor_username, action, resource_type, resource_id, details, created_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, actor_user_id, actor_username, action, resource_type, resource_id, details, created_at
 		FROM audit_events WHERE `+where+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, query.PageSize, offset)...)
 	if err != nil {
 		return AuditPage{}, fmt.Errorf("list audit events: %w", err)
@@ -73,8 +78,12 @@ func (r *SQLiteRepository) ListAudit(query AuditQuery) (AuditPage, error) {
 }
 
 func (r *SQLiteRepository) Stats() (PostStats, error) {
+	return r.StatsContext(context.Background())
+}
+
+func (r *SQLiteRepository) StatsContext(ctx context.Context) (PostStats, error) {
 	var stats PostStats
-	err := r.db.QueryRow(`SELECT COUNT(*),
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END), 0),
 		(SELECT COUNT(*) FROM comments),
@@ -87,23 +96,32 @@ func (r *SQLiteRepository) Stats() (PostStats, error) {
 }
 
 func (r *SQLiteRepository) CreateSession(username, tokenHash string, expiresAt time.Time) error {
-	var userID string
-	if err := r.db.QueryRow(`SELECT id FROM users WHERE username = ?`, username).Scan(&userID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		return fmt.Errorf("resolve session user: %w", err)
-	}
-	_, err := r.db.Exec(`INSERT INTO sessions(token_hash, user_id, username, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`, tokenHash, userID, username, formatTime(expiresAt), formatTime(time.Now().UTC()))
+	return r.CreateSessionContext(context.Background(), username, tokenHash, expiresAt)
+}
+
+func (r *SQLiteRepository) CreateSessionContext(ctx context.Context, username, tokenHash string, expiresAt time.Time) error {
+	result, err := r.db.ExecContext(ctx, `INSERT INTO sessions(token_hash, user_id, username, expires_at, created_at)
+		SELECT ?, id, username, ?, ? FROM users WHERE username = ? AND active = 1`, tokenHash, formatTime(expiresAt), formatTime(time.Now().UTC()), username)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read created session count: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
 
 func (r *SQLiteRepository) ResolveSession(tokenHash string, now time.Time) (string, error) {
+	return r.ResolveSessionContext(context.Background(), tokenHash, now)
+}
+
+func (r *SQLiteRepository) ResolveSessionContext(ctx context.Context, tokenHash string, now time.Time) (string, error) {
 	var username, expiresAt string
-	err := r.db.QueryRow(`SELECT COALESCE(u.username, s.username), s.expires_at
+	err := r.db.QueryRowContext(ctx, `SELECT COALESCE(u.username, s.username), s.expires_at
 		FROM sessions s LEFT JOIN users u ON u.id = NULLIF(s.user_id, '')
 		WHERE s.token_hash = ?`, tokenHash).Scan(&username, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -113,7 +131,6 @@ func (r *SQLiteRepository) ResolveSession(tokenHash string, now time.Time) (stri
 		return "", fmt.Errorf("read session: %w", err)
 	}
 	if !parseTime(expiresAt).After(now) {
-		_ = r.DeleteSession(tokenHash)
 		return "", ErrNotFound
 	}
 	return username, nil
@@ -144,7 +161,11 @@ func (r *SQLiteRepository) DeleteOtherUserSessions(username, tokenHash string) e
 }
 
 func (r *SQLiteRepository) PurgeSessions(now time.Time) error {
-	if _, err := r.db.Exec(`DELETE FROM sessions WHERE expires_at <= ?`, formatTime(now)); err != nil {
+	return r.PurgeSessionsContext(context.Background(), now)
+}
+
+func (r *SQLiteRepository) PurgeSessionsContext(ctx context.Context, now time.Time) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, formatTime(now)); err != nil {
 		return fmt.Errorf("purge sessions: %w", err)
 	}
 	return nil

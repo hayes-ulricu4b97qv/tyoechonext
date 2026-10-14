@@ -228,6 +228,7 @@ form label.check-row, form label.editor-check, label.user-active { display: flex
   gap: 14px;
   padding: 22px 18px 32px;
 }
+.reader-menu-close { display: none; }
 .reader-rail section { display: grid; gap: 6px; padding: 14px; border: 1px solid var(--line); background: var(--card); }
 .reader-rail h2 { display: flex; align-items: center; justify-content: space-between; margin: 0 0 4px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.12em; }
 .reader-rail h2 span { color: var(--muted); font-weight: 650; letter-spacing: 0; }
@@ -473,7 +474,8 @@ button.term-filter { font-size: 13px; font-weight: 650; }
 .comment-row-content p { margin: 8px 0 6px; color: var(--ink); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mail-body { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .comment-row-content small { display: block; }
-.media-upload { position: relative; overflow: hidden; }
+.media-upload { position: relative; }
+.media-upload:focus-within { outline: 2px solid var(--ink); outline-offset: 3px; }
 .media-upload input { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; cursor: pointer; opacity: 0; }
 .media-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .media-card { overflow: hidden; border: 1px solid var(--line); background: var(--card); }
@@ -562,6 +564,15 @@ button.term-filter { font-size: 13px; font-weight: 650; }
     padding: 12px;
     border: 1px solid var(--line);
     background: #fff;
+  }
+  .reader-rail.is-open .reader-menu-close {
+    display: inline-flex;
+    justify-self: end;
+    border: 1px solid var(--line);
+    padding: 8px 12px;
+    background: #fff;
+    color: var(--ink);
+    font-weight: 700;
   }
   .public-shell.menu-open { height: 100vh; overflow: hidden; }
   .public-content { padding: 22px 16px 56px; }

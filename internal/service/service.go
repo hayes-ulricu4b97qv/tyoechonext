@@ -13,6 +13,9 @@ import (
 // MaxContentRunes is the documented maximum length of a post or page body.
 const MaxContentRunes = 500000
 
+// MaxSiteURLBytes bounds canonical URLs embedded in public responses.
+const MaxSiteURLBytes = 512
+
 // MaxSearchRunes bounds work for user-controlled content search queries.
 const MaxSearchRunes = 200
 

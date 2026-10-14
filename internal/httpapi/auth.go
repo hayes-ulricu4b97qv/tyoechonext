@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/service"
+	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 )
 
 type setupRequest struct {
@@ -18,7 +19,15 @@ type setupRequest struct {
 }
 
 func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
-	if s.repo.Initialized() {
+	initialized, err := s.repo.InitializedContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
+	if initialized {
 		writeError(w, http.StatusConflict, "already_initialized", "The application has already been initialized")
 		return
 	}
@@ -27,7 +36,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, err)
 		return
 	}
-	setup, err := s.app.Initialize(service.SetupInput{
+	setup, err := s.app.InitializeContext(r.Context(), service.SetupInput{
 		SiteName:      request.SiteName,
 		SiteURL:       request.SiteURL,
 		AdminUsername: request.AdminUsername,
@@ -36,6 +45,9 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		Timezone:      request.Timezone,
 	})
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		status := http.StatusConflict
 		code := "setup_failed"
 		if errors.Is(err, service.ErrValidation) {
@@ -45,7 +57,10 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, err.Error())
 		return
 	}
-	if err := s.issueSession(w, request.AdminUsername); err != nil {
+	if err := s.issueSessionContext(r.Context(), w, request.AdminUsername); err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
 		return
 	}
@@ -60,7 +75,15 @@ type loginRequest struct {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if !s.repo.Initialized() {
+	initialized, err := s.repo.InitializedContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
+	if !initialized {
 		writeError(w, http.StatusPreconditionRequired, "setup_required", "Complete the initial setup at /setting")
 		return
 	}
@@ -76,7 +99,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "尝试过于频繁，请稍后再试")
 		return
 	}
-	admin, err := s.app.Authenticate(request.Username, request.Password)
+	admin, err := s.app.AuthenticateContext(r.Context(), request.Username, request.Password)
+	if err != nil && r.Context().Err() != nil {
+		return
+	}
 	if err != nil && !errors.Is(err, service.ErrInvalidCredentials) {
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read administrator account")
 		return
@@ -86,7 +112,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.loginFailures.Reset(key)
-	if err := s.issueSession(w, admin.Username); err != nil {
+	if err := s.issueSessionContext(r.Context(), w, admin.Username); err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Username or password is incorrect")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
 		return
 	}
@@ -94,17 +127,30 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	var revokeErr error
 	if cookie, err := r.Cookie(cookieName); err == nil {
-		_ = s.app.RevokeSession(cookie.Value)
+		revokeErr = s.app.RevokeSession(cookie.Value)
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.settings.CookieSecure})
+	if revokeErr != nil {
+		s.logger.Error("unable to revoke sign-in session during logout", "error", revokeErr)
+		writeError(w, http.StatusInternalServerError, "session_revoke_failed", "Unable to revoke sign-in session")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	admin, ok := s.currentAdmin(r)
-	if !ok {
+	admin, err := s.authenticatedAdmin(r.Context(), r)
+	if r.Context().Err() != nil {
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Sign in to continue")
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": publicUser(admin)})

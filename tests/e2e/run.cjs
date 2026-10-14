@@ -322,6 +322,14 @@ async function writePost(title,slug,content,status='published') {
     const searchButton=reader.getByRole('button',{name:'搜索',exact:true});
     assert.ok(await searchButton.evaluate(el=>el===document.activeElement),'Tab should move from search to its submit button');
     assert.equal(await searchButton.evaluate(el=>getComputedStyle(el).outlineStyle),'solid');
+    await reader.emulateMedia({forcedColors:'active'});
+    const highContrastFocus=await searchButton.evaluate(el=>({matches:el.matches(':focus-visible'),style:getComputedStyle(el).outlineStyle,width:getComputedStyle(el).outlineWidth}));
+    assert.deepEqual(highContrastFocus,{matches:true,style:'solid',width:'2px'});
+    await reader.keyboard.press('Shift+Tab');
+    const highContrastInputFocus=await searchInput.evaluate(el=>({matches:el.matches(':focus-visible'),style:getComputedStyle(el).outlineStyle,width:getComputedStyle(el).outlineWidth}));
+    assert.deepEqual(highContrastInputFocus,{matches:true,style:'solid',width:'2px'});
+    await reader.keyboard.press('Tab');
+    await reader.emulateMedia({forcedColors:'none'});
   });
   await step('search, public pagination and feed privacy',async()=>{
     for(let i=0;i<3;i++)await api(owner,'POST','/api/v1/content/posts',{title:'E2E Search '+i,slug:'e2e-search-'+i,content:'needle-search-body',status:'published'},201);
@@ -334,7 +342,12 @@ async function writePost(title,slug,content,status='published') {
   });
   const gif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7','base64');
   await step('media upload, insertion and image rendering',async()=>{
-    await page.goto(base+'/admin');await page.locator('#media').scrollIntoViewIfNeeded();await page.locator('#media input[type=file]').setInputFiles({name:'e2e.gif',mimeType:'image/gif',buffer:gif});
+    await page.goto(base+'/admin');await page.locator('#media').scrollIntoViewIfNeeded();const uploadInput=page.locator('#media input[type=file]');
+    const positionedBeforeUpload=await page.evaluate(()=>{const target=document.querySelector('#media input[type=file]');const controls=Array.from(document.querySelectorAll('a[href],area[href],button:not([disabled]),input:not([type="hidden"]):not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')).filter(el=>el.tabIndex>=0&&el.getClientRects().length>0);const index=controls.indexOf(target);if(index<1)return false;controls[index-1].focus();return true;});
+    assert.ok(positionedBeforeUpload,'the media file input should follow a tabbable control');await page.keyboard.press('Tab');assert.ok(await uploadInput.evaluate(el=>el===document.activeElement),'Tab should reach the media file input');
+    const uploadFocus=await page.locator('#media .media-upload').evaluate(el=>({containsFocus:el.matches(':focus-within'),style:getComputedStyle(el).outlineStyle,width:getComputedStyle(el).outlineWidth}));assert.deepEqual(uploadFocus,{containsFocus:true,style:'solid',width:'2px'});
+    await page.emulateMedia({forcedColors:'active'});const forcedUploadFocus=await page.locator('#media .media-upload').evaluate(el=>({containsFocus:el.matches(':focus-within'),style:getComputedStyle(el).outlineStyle,width:getComputedStyle(el).outlineWidth}));assert.deepEqual(forcedUploadFocus,{containsFocus:true,style:'solid',width:'2px'});await page.emulateMedia({forcedColors:'none'});
+    await uploadInput.setInputFiles({name:'e2e.gif',mimeType:'image/gif',buffer:gif});
     await page.waitForFunction(()=>Array.from(document.querySelectorAll('#media .media-card img')).some(i=>i.complete&&i.naturalWidth>0));
     uploaded=(await api(owner,'GET','/api/v1/media')).items[0];
     await page.locator('#posts').getByRole('button',{name:'+ 写文章',exact:true}).click();
@@ -459,6 +472,13 @@ async function writePost(title,slug,content,status='published') {
   await step('mobile reader and no browser exceptions',async()=>{
     await reader.setViewportSize({width:390,height:844});await reader.goto(base+'/user/e2e-public');await reader.locator('.article-body').waitFor();
     assert.ok(await reader.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'mobile page has horizontal overflow');
+    const menuToggle=reader.locator('.nav-toggle');const rail=reader.locator('#reader-rail');const railLink=rail.locator('a').first();const railLastLink=rail.locator('a').last();const railClose=rail.getByRole('button',{name:'关闭目录',exact:true});const tabToRailLink=async()=>{let focused=false;for(let tab=0;tab<20;tab++){await reader.keyboard.press('Tab');if(await railLink.evaluate(el=>el===document.activeElement)){focused=true;break;}}assert.ok(focused,'Tab navigation should reach the mobile reader rail');};
+    assert.equal(await rail.evaluate(el=>getComputedStyle(el).display),'none','closed mobile rail should be absent from the tab sequence');
+    await menuToggle.click();assert.equal(await menuToggle.getAttribute('aria-expanded'),'true');await railClose.waitFor();await reader.getByRole('dialog',{name:'归档与最新动态'}).waitFor();assert.ok(await railClose.evaluate(el=>el===document.activeElement),'opening the mobile rail should move focus inside it');assert.equal(await reader.locator('.public-bar').evaluate(el=>el.hasAttribute('inert')),true);assert.equal(await reader.locator('.public-content').evaluate(el=>el.hasAttribute('inert')),true);
+    await railLastLink.focus();await reader.keyboard.press('Tab');assert.ok(await railClose.evaluate(el=>el===document.activeElement),'Tab from the last rail link should wrap to the close button');await reader.keyboard.press('Shift+Tab');assert.ok(await railLastLink.evaluate(el=>el===document.activeElement),'Shift+Tab from the first rail control should wrap to the last link');
+    await reader.keyboard.press('Escape');assert.equal(await menuToggle.getAttribute('aria-expanded'),'false');assert.ok(await menuToggle.evaluate(el=>el===document.activeElement),'Escape should restore focus to the mobile menu toggle');
+    await menuToggle.click();await railClose.waitFor();await railClose.click();assert.equal(await menuToggle.getAttribute('aria-expanded'),'false');assert.ok(await menuToggle.evaluate(el=>el===document.activeElement),'the dialog close button should restore focus to its toggle');
+    await menuToggle.click();await tabToRailLink();await reader.locator('.rail-backdrop').click({position:{x:2,y:300}});assert.equal(await menuToggle.getAttribute('aria-expanded'),'false');assert.ok(await menuToggle.evaluate(el=>el===document.activeElement),'closing the mobile menu backdrop should restore focus to its toggle');
     await reader.screenshot({path:path.join(artifacts,'mobile-reader.png'),fullPage:true});await page.screenshot({path:path.join(artifacts,'admin.png'),fullPage:true});assert.deepEqual(errors,[]);
   });
 })().catch(async error=>{

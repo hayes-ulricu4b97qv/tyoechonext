@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
@@ -11,19 +12,35 @@ func (s *Service) RecordAudit(event store.AuditEvent) error {
 }
 
 func (s *Service) ListAudit(action, resourceType string, page, pageSize int) (store.AuditPage, error) {
-	return s.repo.ListAudit(store.AuditQuery{Action: action, ResourceType: resourceType, Page: page, PageSize: pageSize})
+	return s.ListAuditContext(context.Background(), action, resourceType, page, pageSize)
+}
+
+func (s *Service) ListAuditContext(ctx context.Context, action, resourceType string, page, pageSize int) (store.AuditPage, error) {
+	return s.repo.ListAuditContext(ctx, store.AuditQuery{Action: action, ResourceType: resourceType, Page: page, PageSize: pageSize})
 }
 
 func (s *Service) Stats() (store.PostStats, error) {
 	return s.repo.Stats()
 }
 
+func (s *Service) StatsContext(ctx context.Context) (store.PostStats, error) {
+	return s.repo.StatsContext(ctx)
+}
+
 func (s *Service) CreateSession(username, token string, expiresAt time.Time) error {
-	return s.repo.CreateSession(username, hashToken(token), expiresAt)
+	return s.CreateSessionContext(context.Background(), username, token, expiresAt)
+}
+
+func (s *Service) CreateSessionContext(ctx context.Context, username, token string, expiresAt time.Time) error {
+	return s.repo.CreateSessionContext(ctx, username, hashToken(token), expiresAt)
 }
 
 func (s *Service) ResolveSession(token string, now time.Time) (string, error) {
 	return s.repo.ResolveSession(hashToken(token), now)
+}
+
+func (s *Service) ResolveSessionContext(ctx context.Context, token string, now time.Time) (string, error) {
+	return s.repo.ResolveSessionContext(ctx, hashToken(token), now)
 }
 
 func (s *Service) RevokeSession(token string) error {
@@ -43,4 +60,8 @@ func (s *Service) RevokeOtherSessions(username, token string) error {
 
 func (s *Service) PurgeSessions(now time.Time) error {
 	return s.repo.PurgeSessions(now)
+}
+
+func (s *Service) PurgeSessionsContext(ctx context.Context, now time.Time) error {
+	return s.repo.PurgeSessionsContext(ctx, now)
 }

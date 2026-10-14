@@ -45,8 +45,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer repository.Close()
+	cleanOutboundMail(context.Background(), repository, logger)
+	cleanExpiredSessions(repository, logger)
 
 	server := httpapi.NewServer(repository, settings, logger, configuredMailer)
+	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		maintainDailyCleanup(maintenanceCtx, repository, logger)
+	}()
 	httpServer := &http.Server{
 		Addr:              ":" + port,
 		Handler:           server.Handler(),
@@ -67,10 +75,41 @@ func main() {
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 	<-shutdown
+	stopMaintenance()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+	}
+	<-maintenanceDone
+}
+
+func maintainDailyCleanup(ctx context.Context, repository store.Repository, logger *slog.Logger) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanOutboundMail(ctx, repository, logger)
+			cleanExpiredSessions(repository, logger)
+		}
+	}
+}
+
+func cleanOutboundMail(ctx context.Context, repository store.Repository, logger *slog.Logger) {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	if err := repository.CleanupOutboundMail(cleanupCtx, cutoff); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Warn("clean outbound mail history", "error", err)
+	}
+}
+
+func cleanExpiredSessions(repository store.Repository, logger *slog.Logger) {
+	if err := repository.PurgeSessions(time.Now().UTC()); err != nil {
+		logger.Warn("clean expired sessions", "error", err)
 	}
 }
 

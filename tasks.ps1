@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('dev', 'web-build', 'api-run', 'build', 'clean')]
+    [ValidateSet('dev', 'web-build', 'api-run', 'build', 'fmt-check', 'clean')]
     [string]$Task = 'build'
 )
 
@@ -26,6 +26,28 @@ function Build-Web {
     }
 }
 
+function Test-GoFormat {
+    $goFiles = @(git ls-files --cached --others --exclude-standard -- '*.go')
+    if ($LASTEXITCODE -ne 0) {
+        throw "git ls-files exited with code $LASTEXITCODE"
+    }
+
+    $unformatted = @()
+    foreach ($goFile in $goFiles) {
+        $result = & gofmt -l $goFile
+        if ($LASTEXITCODE -ne 0) {
+            throw "gofmt failed for $goFile with code $LASTEXITCODE"
+        }
+        if ($result) {
+            $unformatted += $result
+        }
+    }
+    if ($unformatted.Count -gt 0) {
+        throw "Run gofmt on:`n$($unformatted -join "`n")"
+    }
+    Write-Output 'All Go files are gofmt-formatted.'
+}
+
 Push-Location $PSScriptRoot
 try {
     switch ($Task) {
@@ -35,6 +57,7 @@ try {
         }
         'web-build' { Build-Web }
         'api-run' { Invoke-CommandChecked 'go' @('run', './cmd/server') }
+        'fmt-check' { Test-GoFormat }
         'build' {
             Build-Web
             New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot 'bin') | Out-Null

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"archive/zip"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -21,8 +22,9 @@ import (
 )
 
 const (
-	maxForwardedForBytes = 4096
-	maxForwardedForHops  = 32
+	maxForwardedForBytes      = 4096
+	maxForwardedForHops       = 32
+	postRevisionPageSizeLimit = 20
 )
 
 func (s *Server) loginFailureLimit() int {
@@ -120,7 +122,15 @@ type forgotRequest struct {
 }
 
 func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
-	if !s.repo.Initialized() {
+	initialized, err := s.repo.InitializedContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
+	if !initialized {
 		writeError(w, http.StatusPreconditionRequired, "setup_required", "Complete the initial setup at /setting")
 		return
 	}
@@ -141,7 +151,14 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "mail_unavailable", "站点尚未配置安全邮件投递，暂时无法找回密码")
 		return
 	}
-	account, lookupErr := s.repo.User(strings.TrimSpace(request.Username))
+	account, lookupErr := s.repo.UserContext(r.Context(), strings.TrimSpace(request.Username))
+	if r.Context().Err() != nil {
+		return
+	}
+	if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+		s.writeRepositoryUnavailable(w, r, lookupErr)
+		return
+	}
 	accountKnown := lookupErr == nil && account.Active
 	accountLimit := s.settings.PasswordResetAccountLimit
 	if accountLimit < 1 {
@@ -155,6 +172,9 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	if requestErr != nil && accountKnown {
 		// Do not make a failed SMTP attempt block an immediate retry.
 		s.forgotAccounts.Reset(account.Username)
+	}
+	if r.Context().Err() != nil {
+		return
 	}
 	if errors.Is(requestErr, service.ErrMailUnavailable) {
 		writeError(w, http.StatusServiceUnavailable, "mail_unavailable", "站点尚未配置安全邮件投递，暂时无法找回密码")
@@ -184,8 +204,11 @@ func (s *Server) listOutboundMail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
 		return
 	}
-	mailPage, err := s.app.ListOutboundMail(page, pageSize)
+	mailPage, err := s.app.ListOutboundMailContext(r.Context(), page, pageSize)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read mail")
 		return
 	}
@@ -196,7 +219,15 @@ func (s *Server) listOutboundMail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
-	if !s.repo.Initialized() {
+	initialized, err := s.repo.InitializedContext(r.Context())
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		s.writeRepositoryUnavailable(w, r, err)
+		return
+	}
+	if !initialized {
 		writeError(w, http.StatusPreconditionRequired, "setup_required", "Complete the initial setup at /setting")
 		return
 	}
@@ -205,12 +236,23 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, err)
 		return
 	}
-	if err := s.app.ResetPassword(request.Token, request.Password); err != nil {
-		if serviceErr, code := serviceError(err); code == "validation_error" {
-			writeError(w, serviceErr, code, err.Error())
+	if err := s.app.ResetPasswordContext(r.Context(), request.Token, request.Password); err != nil {
+		if r.Context().Err() != nil {
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_token", "The reset token is invalid or expired")
+		if errors.Is(err, service.ErrValidation) {
+			writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, "invalid_token", "The reset token is invalid or expired")
+			return
+		}
+		s.logger.Error("password reset failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "reset_failed", "Unable to reset password")
+		return
+	}
+	if r.Context().Err() != nil {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"reset": true})
@@ -220,8 +262,19 @@ func (s *Server) listPostRevisions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireContentEditor(w, r) {
 		return
 	}
-	revisions, err := s.app.ListPostRevisions(r.PathValue("id"))
+	page, pageSize, ok := s.pages(w, r)
+	if !ok {
+		return
+	}
+	if pageSize > postRevisionPageSizeLimit {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", fmt.Sprintf("修订历史 pageSize 最大为 %d", postRevisionPageSizeLimit))
+		return
+	}
+	revisions, err := s.app.ListPostRevisionPageContext(r.Context(), r.PathValue("id"), page, pageSize)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		status, code := serviceError(err)
 		if code == "not_found" {
 			writeError(w, http.StatusNotFound, "not_found", "Post not found")
@@ -230,18 +283,21 @@ func (s *Server) listPostRevisions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "read_failed", "Unable to read revisions")
 		return
 	}
-	if revisions == nil {
-		revisions = []store.PostRevision{}
+	if revisions.Items == nil {
+		revisions.Items = []store.PostRevisionSummary{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": revisions})
+	writeJSON(w, http.StatusOK, revisions)
 }
 
 func (s *Server) restorePostRevision(w http.ResponseWriter, r *http.Request) {
 	if !s.requireContentEditor(w, r) {
 		return
 	}
-	restored, err := s.app.RestorePostRevision(r.PathValue("id"), r.PathValue("revisionID"))
+	restored, changed, err := s.app.RestorePostRevisionWithChangeContext(r.Context(), r.PathValue("id"), r.PathValue("revisionID"))
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		status, code := serviceError(err)
 		if code == "not_found" {
 			writeError(w, http.StatusNotFound, "not_found", "Revision not found")
@@ -250,7 +306,9 @@ func (s *Server) restorePostRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, err.Error())
 		return
 	}
-	s.recordAudit(r, "post.restored", "post", restored.ID, map[string]string{"revisionId": r.PathValue("revisionID")})
+	if changed {
+		s.recordAudit(r, "post.restored", "post", restored.ID, map[string]string{"revisionId": r.PathValue("revisionID")})
+	}
 	writeJSON(w, http.StatusOK, publicPost(restored, true))
 }
 
@@ -258,6 +316,7 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r) {
 		return
 	}
+	ctx := r.Context()
 	tempDir, err := os.MkdirTemp("", "typecho-backup-*")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "backup_failed", "Unable to prepare the backup")
@@ -265,12 +324,18 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(tempDir)
 	dbPath := filepath.Join(tempDir, "app.db")
-	if err := s.repo.BackupDatabase(dbPath); err != nil {
+	if err := s.repo.BackupDatabaseContext(ctx, dbPath); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "backup_failed", "Unable to prepare the backup")
 		return
 	}
 	archivePath := filepath.Join(tempDir, "backup.zip")
-	if err := buildBackup(archivePath, dbPath, s.mediaRoot); err != nil {
+	if err := buildBackupContext(ctx, archivePath, dbPath, s.mediaRoot); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		s.logger.Error("prepare backup", "error", err)
 		writeError(w, http.StatusInternalServerError, "backup_failed", "Unable to prepare the backup")
 		return
@@ -295,6 +360,13 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 // Build the complete archive before sending a successful HTTP response. Media
 // references come from the database snapshot, rather than the changing live DB.
 func buildBackup(archivePath, dbPath, mediaRoot string) (err error) {
+	return buildBackupContext(context.Background(), archivePath, dbPath, mediaRoot)
+}
+
+func buildBackupContext(ctx context.Context, archivePath, dbPath, mediaRoot string) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	absolutePath, err := filepath.Abs(dbPath)
 	if err != nil {
 		return err
@@ -324,23 +396,26 @@ func buildBackup(archivePath, dbPath, mediaRoot string) (err error) {
 			err = closeErr
 		}
 	}()
-	if err := addZipFile(archive, "app.db", dbPath); err != nil {
+	if err := addZipFileContext(ctx, archive, "app.db", dbPath); err != nil {
 		return err
 	}
-	rows, err := snapshot.Query("SELECT id, storage_key FROM media ORDER BY id")
+	rows, err := snapshot.QueryContext(ctx, "SELECT id, storage_key FROM media ORDER BY id")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var id, key string
 		if err := rows.Scan(&id, &key); err != nil {
 			return err
 		}
-		if key == "" || key == "." || key == ".." || filepath.Base(key) != key || strings.ContainsAny(key, `/\`) {
+		if !validMediaStorageKey(key) {
 			return fmt.Errorf("invalid media storage key: %q", key)
 		}
-		if err := addZipFile(archive, "media/"+key, filepath.Join(mediaRoot, key)); err != nil {
+		if err := addZipFileContext(ctx, archive, "media/"+key, filepath.Join(mediaRoot, key)); err != nil {
 			return fmt.Errorf("backup media %s: %w", id, err)
 		}
 	}
@@ -348,6 +423,10 @@ func buildBackup(archivePath, dbPath, mediaRoot string) (err error) {
 }
 
 func addZipFile(archive *zip.Writer, name, path string) error {
+	return addZipFileContext(context.Background(), archive, name, path)
+}
+
+func addZipFileContext(ctx context.Context, archive *zip.Writer, name, path string) error {
 	file, info, err := openRegularFile(path)
 	if err != nil {
 		return err
@@ -363,8 +442,20 @@ func addZipFile(archive *zip.Writer, name, path string) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(writer, file)
+	_, err = io.Copy(writer, contextReader{ctx: ctx, source: file})
 	return err
+}
+
+type contextReader struct {
+	ctx    context.Context
+	source io.Reader
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.source.Read(buffer)
 }
 
 func openRegularFile(path string) (*os.File, os.FileInfo, error) {

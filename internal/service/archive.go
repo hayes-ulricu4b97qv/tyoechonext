@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,10 @@ import (
 )
 
 func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order string, includeDrafts bool, status string, page, pageSize int) (store.PostPage, error) {
+	return s.ListPostsByTermsContext(context.Background(), search, categorySlug, tagSlug, month, order, includeDrafts, status, page, pageSize)
+}
+
+func (s *Service) ListPostsByTermsContext(ctx context.Context, search, categorySlug, tagSlug, month, order string, includeDrafts bool, status string, page, pageSize int) (store.PostPage, error) {
 	search, err := normalizeSearchQuery(search)
 	if err != nil {
 		return store.PostPage{}, err
@@ -35,7 +40,7 @@ func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order s
 	}
 	month = strings.TrimSpace(month)
 	if month != "" {
-		location, err := s.siteLocation()
+		location, err := s.siteLocationContext(ctx)
 		if err != nil {
 			return store.PostPage{}, err
 		}
@@ -44,27 +49,34 @@ func (s *Service) ListPostsByTerms(search, categorySlug, tagSlug, month, order s
 			return store.PostPage{}, err
 		}
 	}
-	return s.repo.SearchPosts(query)
+	return s.repo.SearchPostsContext(ctx, query)
 }
 
 func FeedBlurb(excerpt, content string) string {
 	if text := strings.TrimSpace(excerpt); text != "" {
 		return text
 	}
-	runes := []rune(content)
 	const limit = 280
-	if len(runes) <= limit {
-		return content
+	runeCount := 0
+	for index := range content {
+		if runeCount == limit {
+			return content[:index] + "…"
+		}
+		runeCount++
 	}
-	return string(runes[:limit]) + "…"
+	return content
 }
 
 func (s *Service) MonthArchive() ([]store.MonthCount, error) {
-	loc, err := s.siteLocation()
+	return s.MonthArchiveContext(context.Background())
+}
+
+func (s *Service) MonthArchiveContext(ctx context.Context) ([]store.MonthCount, error) {
+	loc, err := s.siteLocationContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	posts, err := s.repo.ListPublishedMeta()
+	posts, err := s.repo.ListPublishedMetaContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -81,14 +93,18 @@ func (s *Service) MonthArchive() ([]store.MonthCount, error) {
 }
 
 func (s *Service) PublishedNeighbors(post store.Post) (*store.Post, *store.Post, error) {
+	return s.PublishedNeighborsContext(context.Background(), post)
+}
+
+func (s *Service) PublishedNeighborsContext(ctx context.Context, post store.Post) (*store.Post, *store.Post, error) {
 	if post.Status != "published" || post.PublishedAt.IsZero() {
 		return nil, nil, nil
 	}
-	return s.repo.PublishedNeighbors(post)
+	return s.repo.PublishedNeighborsContext(ctx, post)
 }
 
-func (s *Service) siteLocation() (*time.Location, error) {
-	site, err := s.repo.Site()
+func (s *Service) siteLocationContext(ctx context.Context) (*time.Location, error) {
+	site, err := s.repo.SiteContext(ctx)
 	if err != nil {
 		return nil, err
 	}

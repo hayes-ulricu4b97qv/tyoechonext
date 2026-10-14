@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,11 @@ type loginCountingRepository struct {
 func (r *loginCountingRepository) User(username string) (store.User, error) {
 	r.userReads.Add(1)
 	return r.Repository.User(username)
+}
+
+func (r *loginCountingRepository) UserContext(ctx context.Context, username string) (store.User, error) {
+	r.userReads.Add(1)
+	return r.Repository.UserContext(ctx, username)
 }
 
 func TestLoginLimitIsPerClientAndRejectsBeforeAuthentication(t *testing.T) {
