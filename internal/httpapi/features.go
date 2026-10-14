@@ -323,7 +323,9 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_token", "The reset token is invalid or expired")
 			return
 		}
-		s.logger.Error("password reset failed", "error", err)
+		if s.forgotFailureLogs.Allow("reset-failed", 1, time.Minute) {
+			s.logger.Error("password reset failed", "error", err)
+		}
 		writeError(w, http.StatusInternalServerError, "reset_failed", "Unable to reset password")
 		return
 	}
