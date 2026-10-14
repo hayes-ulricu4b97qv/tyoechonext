@@ -49,3 +49,4 @@ jobs:
         with:
           name: windows-e2e-results
           path: .e2e-artifacts/
+          include-hidden-files: true
