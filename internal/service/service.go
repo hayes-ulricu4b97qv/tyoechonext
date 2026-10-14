@@ -25,8 +25,9 @@ const MaxSearchRunes = 200
 const maxBcryptInputBytes = 72
 
 var (
-	ErrValidation         = errors.New("validation error")
-	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrValidation            = errors.New("validation error")
+	ErrInvalidCredentials    = errors.New("invalid credentials")
+	ErrRepositoryUnavailable = errors.New("repository unavailable")
 )
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{2,31}$`)

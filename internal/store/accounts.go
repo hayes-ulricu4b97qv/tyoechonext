@@ -361,7 +361,7 @@ func (r *SQLiteRepository) SetupContext(ctx context.Context, site Site, admin Ad
 		return fmt.Errorf("check setup state: %w", err)
 	}
 	if count > 0 {
-		return errors.New("application is already initialized")
+		return ErrAlreadyInitialized
 	}
 	now := time.Now().UTC()
 	site.CreatedAt = now

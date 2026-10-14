@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
@@ -32,7 +34,11 @@ func (s *Service) CreateSession(username, token string, expiresAt time.Time) err
 }
 
 func (s *Service) CreateSessionContext(ctx context.Context, username, token string, expiresAt time.Time) error {
-	return s.repo.CreateSessionContext(ctx, username, hashToken(token), expiresAt)
+	err := s.repo.CreateSessionContext(ctx, username, hashToken(token), expiresAt)
+	if err == nil || errors.Is(err, store.ErrNotFound) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: create session: %w", ErrRepositoryUnavailable, err)
 }
 
 func (s *Service) ResolveSession(token string, now time.Time) (string, error) {

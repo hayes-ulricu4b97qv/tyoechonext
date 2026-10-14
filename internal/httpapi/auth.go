@@ -48,20 +48,27 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Err() != nil {
 			return
 		}
-		status := http.StatusConflict
-		code := "setup_failed"
-		if errors.Is(err, service.ErrValidation) {
-			status = http.StatusUnprocessableEntity
-			code = "validation_error"
+		switch {
+		case errors.Is(err, store.ErrAlreadyInitialized):
+			writeError(w, http.StatusConflict, "already_initialized", "The application has already been initialized")
+		case errors.Is(err, service.ErrValidation):
+			writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		case errors.Is(err, service.ErrRepositoryUnavailable):
+			s.writeRepositoryUnavailable(w, r, err)
+		default:
+			writeError(w, http.StatusInternalServerError, "setup_failed", "Unable to complete initial setup")
 		}
-		writeError(w, status, code, err.Error())
 		return
 	}
 	if err := s.issueSessionContext(r.Context(), w, request.AdminUsername); err != nil {
 		if r.Context().Err() != nil {
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
+		if errors.Is(err, service.ErrRepositoryUnavailable) {
+			s.writeRepositoryUnavailable(w, r, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
+		}
 		return
 	}
 	// The setup request has no session cookie yet, so keep the actor identity in details.
@@ -104,7 +111,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil && !errors.Is(err, service.ErrInvalidCredentials) {
-		s.writeRepositoryUnavailable(w, r, err)
+		if errors.Is(err, service.ErrRepositoryUnavailable) {
+			s.writeRepositoryUnavailable(w, r, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read administrator account")
+		}
 		return
 	}
 	if errors.Is(err, service.ErrInvalidCredentials) || admin == nil {
@@ -120,7 +131,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Username or password is incorrect")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
+		if errors.Is(err, service.ErrRepositoryUnavailable) {
+			s.writeRepositoryUnavailable(w, r, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, "session_failed", "Unable to create a sign-in session")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": publicUser(admin)})

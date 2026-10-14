@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	ErrNotFound         = errors.New("record not found")
-	ErrConflict         = errors.New("unique constraint conflict")
-	ErrProtectedAccount = errors.New("account is protected")
+	ErrNotFound           = errors.New("record not found")
+	ErrConflict           = errors.New("unique constraint conflict")
+	ErrAlreadyInitialized = errors.New("application is already initialized")
+	ErrProtectedAccount   = errors.New("account is protected")
 )
 
 type Site struct {

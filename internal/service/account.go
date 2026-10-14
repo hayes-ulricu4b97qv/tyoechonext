@@ -53,7 +53,10 @@ func (s *Service) InitializeContext(ctx context.Context, input SetupInput) (*sto
 		Email:        strings.TrimSpace(input.AdminEmail),
 	}
 	if err := s.repo.SetupContext(ctx, site, admin); err != nil {
-		return nil, err
+		if errors.Is(err, store.ErrAlreadyInitialized) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: initialize site: %w", ErrRepositoryUnavailable, err)
 	}
 	return &site, nil
 }
@@ -77,7 +80,7 @@ func (s *Service) AuthenticateContext(ctx context.Context, username, password st
 		return nil, ErrInvalidCredentials
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: read user for authentication: %w", ErrRepositoryUnavailable, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
