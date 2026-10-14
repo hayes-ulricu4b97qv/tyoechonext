@@ -503,7 +503,11 @@ func (s *Server) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() {
+		if err := os.Remove(temporaryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logWarnRateLimited("media-upload-cleanup", "remove temporary media upload failed", "path", temporaryPath, "error", err)
+		}
+	}()
 	written, err := temporary.Write(head[:n])
 	if err != nil || written != n {
 		_ = temporary.Close()
@@ -546,12 +550,16 @@ func (s *Server) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Context().Err() != nil {
-		_ = os.Remove(finalPath)
+		if err := os.Remove(finalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logWarnRateLimited("media-upload-cleanup", "remove unregistered media upload failed", "path", finalPath, "error", err)
+		}
 		return
 	}
 	media, err := s.app.RegisterMediaContext(r.Context(), store.Media{ID: id, Filename: filename, ContentType: contentType, Size: totalSize, StorageKey: storageKey})
 	if err != nil {
-		_ = os.Remove(finalPath)
+		if cleanupErr := os.Remove(finalPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+			s.logWarnRateLimited("media-upload-cleanup", "remove unregistered media upload failed", "path", finalPath, "error", cleanupErr)
+		}
 		if r.Context().Err() != nil {
 			return
 		}

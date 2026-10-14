@@ -399,7 +399,11 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "backup_failed", "Unable to prepare the backup")
 		return
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			s.logWarnRateLimited("backup-cleanup", "remove temporary backup files failed", "path", tempDir, "error", err)
+		}
+	}()
 	dbPath := filepath.Join(tempDir, "app.db")
 	if err := s.repo.BackupDatabaseContext(ctx, dbPath); err != nil {
 		if ctx.Err() != nil {
