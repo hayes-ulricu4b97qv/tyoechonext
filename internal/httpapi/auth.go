@@ -148,7 +148,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.settings.CookieSecure})
 	if revokeErr != nil {
-		s.logger.Error("unable to revoke sign-in session during logout", "error", revokeErr)
+		s.logErrorRateLimited("logout-session-revoke", "unable to revoke sign-in session during logout", "error", revokeErr)
 		writeError(w, http.StatusInternalServerError, "session_revoke_failed", "Unable to revoke sign-in session")
 		return
 	}

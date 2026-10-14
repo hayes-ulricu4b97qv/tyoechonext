@@ -76,7 +76,7 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 			return
 		}
 		if err != nil {
-			s.logger.Error("read public post shell", "slug", slug, "error", err)
+			s.logErrorRateLimited("public-post-shell-read", "read public post shell", "slug", slug, "error", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
@@ -118,7 +118,7 @@ func (s *Server) serveAppShell(w http.ResponseWriter, r *http.Request, cleanPath
 			return
 		}
 		if err != nil {
-			s.logger.Error("read public page shell", "slug", slug, "error", err)
+			s.logErrorRateLimited("public-page-shell-read", "read public page shell", "slug", slug, "error", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}

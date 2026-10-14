@@ -451,7 +451,7 @@ func (s *Server) uploadMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := form.RemoveAll(); err != nil {
-			s.logger.Warn("unable to clean multipart upload temporary files", "error", err)
+			s.logWarnRateLimited("media-upload-temp-cleanup", "unable to clean multipart upload temporary files", "error", err)
 		}
 	}()
 	if len(form.File) != 1 || len(form.File["file"]) != 1 || len(form.Value) != 0 {
@@ -464,7 +464,7 @@ func (s *Server) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Err() != nil {
 			return
 		}
-		s.logger.Error("unable to open uploaded media part", "error", err)
+		s.logErrorRateLimited("media-upload-part-open", "unable to open uploaded media part", "error", err)
 		writeError(w, http.StatusInternalServerError, "storage_failed", "Unable to open uploaded file")
 		return
 	}
@@ -582,7 +582,7 @@ func (s *Server) deleteMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, store.ErrNotFound) {
 		if cleanupErr := removeStagedMedia(mediaDeleteStagingPath(s.mediaRoot, mediaID)); cleanupErr != nil {
-			s.logger.Warn("unable to remove staged file for deleted media", "media_id", mediaID, "error", cleanupErr)
+			s.logWarnRateLimited("media-delete-stage-cleanup", "unable to remove staged file for deleted media", "media_id", mediaID, "error", cleanupErr)
 		}
 		if r.Context().Err() != nil {
 			return
@@ -608,7 +608,7 @@ func (s *Server) deleteMedia(w http.ResponseWriter, r *http.Request) {
 	if r.Context().Err() != nil {
 		if staged {
 			if restoreErr := restoreStagedMedia(originalPath, stagedPath); restoreErr != nil {
-				s.logger.Error("unable to restore media file after canceled deletion", "media_id", media.ID, "error", restoreErr)
+				s.logErrorRateLimited("media-delete-stage-restore", "unable to restore media file after canceled deletion", "media_id", media.ID, "error", restoreErr)
 			}
 		}
 		return
@@ -618,7 +618,7 @@ func (s *Server) deleteMedia(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) {
 		if staged {
 			if cleanupErr := removeStagedMedia(stagedPath); cleanupErr != nil {
-				s.logger.Warn("unable to remove staged file for deleted media", "media_id", media.ID, "error", cleanupErr)
+				s.logWarnRateLimited("media-delete-stage-cleanup", "unable to remove staged file for deleted media", "media_id", media.ID, "error", cleanupErr)
 			}
 		}
 		if r.Context().Err() != nil {
@@ -630,7 +630,7 @@ func (s *Server) deleteMedia(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if staged {
 			if restoreErr := restoreStagedMedia(originalPath, stagedPath); restoreErr != nil {
-				s.logger.Error("unable to restore media file after database deletion failed", "media_id", media.ID, "error", restoreErr)
+				s.logErrorRateLimited("media-delete-stage-restore", "unable to restore media file after database deletion failed", "media_id", media.ID, "error", restoreErr)
 			}
 		}
 		if r.Context().Err() != nil {
@@ -642,7 +642,7 @@ func (s *Server) deleteMedia(w http.ResponseWriter, r *http.Request) {
 	s.recordAudit(r, "media.deleted", "media", media.ID, map[string]string{"filename": media.Filename})
 	if staged {
 		if cleanupErr := removeStagedMedia(stagedPath); cleanupErr != nil {
-			s.logger.Warn("unable to remove staged file for deleted media", "media_id", media.ID, "error", cleanupErr)
+			s.logWarnRateLimited("media-delete-stage-cleanup", "unable to remove staged file for deleted media", "media_id", media.ID, "error", cleanupErr)
 		}
 	}
 	if r.Context().Err() != nil {

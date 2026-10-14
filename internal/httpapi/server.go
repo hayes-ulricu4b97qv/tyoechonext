@@ -57,20 +57,20 @@ var scalarAPIQueryParameters = []string{
 var scalarReaderQueryParameters = []string{"category", "month", "page", "preview", "q", "tag"}
 
 type Server struct {
-	repo                  store.Repository
-	app                   *service.Service
-	settings              config.Settings
-	logger                *slog.Logger
-	webDir                string
-	mediaRoot             string
-	mediaDeleteMu         sync.Mutex
-	trustedProxies        []*net.IPNet
-	loginFailures         *service.HitCounter
-	commentHits           *service.HitCounter
-	forgotHits            *service.HitCounter
-	forgotAccounts        *service.HitCounter
-	forgotFailureLogs     *service.HitCounter
-	repositoryFailureLogs *service.HitCounter
+	repo              store.Repository
+	app               *service.Service
+	settings          config.Settings
+	logger            *slog.Logger
+	webDir            string
+	mediaRoot         string
+	mediaDeleteMu     sync.Mutex
+	trustedProxies    []*net.IPNet
+	loginFailures     *service.HitCounter
+	commentHits       *service.HitCounter
+	forgotHits        *service.HitCounter
+	forgotAccounts    *service.HitCounter
+	forgotFailureLogs *service.HitCounter
+	failureLogLimits  *service.HitCounter
 }
 
 func NewServer(repo store.Repository, settings config.Settings, logger *slog.Logger, mailers ...service.Mailer) *Server {
@@ -94,19 +94,19 @@ func NewServer(repo store.Repository, settings config.Settings, logger *slog.Log
 		mailer = mailers[0]
 	}
 	return &Server{
-		repo:                  repo,
-		app:                   service.New(repo, logger, mailer),
-		settings:              settings,
-		logger:                logger,
-		webDir:                webDir,
-		mediaRoot:             mediaRoot,
-		trustedProxies:        parseTrustedProxyCIDRs(settings.TrustedProxyCIDRs, logger),
-		loginFailures:         service.NewHitCounter(),
-		commentHits:           service.NewHitCounter(),
-		forgotHits:            service.NewHitCounter(),
-		forgotAccounts:        service.NewHitCounter(),
-		forgotFailureLogs:     service.NewHitCounter(),
-		repositoryFailureLogs: service.NewHitCounter(),
+		repo:              repo,
+		app:               service.New(repo, logger, mailer),
+		settings:          settings,
+		logger:            logger,
+		webDir:            webDir,
+		mediaRoot:         mediaRoot,
+		trustedProxies:    parseTrustedProxyCIDRs(settings.TrustedProxyCIDRs, logger),
+		loginFailures:     service.NewHitCounter(),
+		commentHits:       service.NewHitCounter(),
+		forgotHits:        service.NewHitCounter(),
+		forgotAccounts:    service.NewHitCounter(),
+		forgotFailureLogs: service.NewHitCounter(),
+		failureLogLimits:  service.NewHitCounter(),
 	}
 }
 
@@ -175,14 +175,27 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) writeRepositoryUnavailable(w http.ResponseWriter, r *http.Request, err error) {
-	if s.repositoryFailureLogs.Allow("repository-unavailable", 1, time.Minute) {
-		s.logger.Error("repository unavailable", "error", err)
-	}
+	s.logErrorRateLimited("repository-unavailable", "repository unavailable", "error", err)
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		writeError(w, http.StatusServiceUnavailable, "not_ready", "The content store is unavailable")
 		return
 	}
 	http.Error(w, "The content store is unavailable", http.StatusServiceUnavailable)
+}
+
+func (s *Server) logErrorRateLimited(key string, message string, args ...any) {
+	s.logFailureRateLimited(key, slog.LevelError, message, args...)
+}
+
+func (s *Server) logWarnRateLimited(key string, message string, args ...any) {
+	s.logFailureRateLimited(key, slog.LevelWarn, message, args...)
+}
+
+func (s *Server) logFailureRateLimited(key string, level slog.Level, message string, args ...any) {
+	if !s.failureLogLimits.Allow(key, 1, time.Minute) {
+		return
+	}
+	s.logger.Log(context.Background(), level, message, args...)
 }
 
 func (s *Server) routeGuard(next http.Handler) http.Handler {
@@ -447,7 +460,7 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 					s.logger.Debug("stop RSS response", "error", err)
 					return
 				}
-				s.logger.Error("read published posts while streaming RSS", "page", page, "error", err)
+				s.logErrorRateLimited("rss-read-posts", "read published posts while streaming RSS", "page", page, "error", err)
 				return
 			}
 		}
@@ -746,7 +759,7 @@ func (s *Server) recordAudit(r *http.Request, action, resourceType, resourceID s
 		event.ActorUsername = user.Username
 	}
 	if err := s.app.RecordAudit(event); err != nil {
-		s.logger.Warn("record audit event failed", "action", action, "resource_type", resourceType, "resource_id", resourceID, "error", err)
+		s.logWarnRateLimited("audit-write", "record audit event failed", "action", action, "resource_type", resourceType, "resource_id", resourceID, "error", err)
 	}
 }
 
@@ -772,7 +785,7 @@ func (s *Server) issueSessionContext(ctx context.Context, w http.ResponseWriter,
 	}
 	revokeUnissuedSession := func() {
 		if err := s.app.RevokeSession(token); err != nil {
-			s.logger.Warn("revoke sign-in session after canceled request failed", "error", err)
+			s.logWarnRateLimited("session-revoke-after-cancel", "revoke sign-in session after canceled request failed", "error", err)
 		}
 	}
 	if err := ctx.Err(); err != nil {

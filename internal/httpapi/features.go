@@ -164,7 +164,7 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reserveErr != nil {
-		s.logger.Warn("password reset capacity reservation failed", "error", reserveErr)
+		s.logWarnRateLimited("password-reset-reservation", "password reset capacity reservation failed", "error", reserveErr)
 		if waitForPasswordResetResponse(r.Context(), acceptedSince, nil, nil) {
 			writeError(w, http.StatusServiceUnavailable, "not_ready", "密码找回服务暂不可用，请稍后重试")
 		}
@@ -413,7 +413,7 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.Error("prepare backup", "error", err)
+		s.logErrorRateLimited("backup-prepare", "prepare backup", "error", err)
 		writeError(w, http.StatusInternalServerError, "backup_failed", "Unable to prepare the backup")
 		return
 	}
