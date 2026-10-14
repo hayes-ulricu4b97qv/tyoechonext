@@ -275,11 +275,14 @@ func TestFuturePublishRevisionsPassphraseCommentsMailAndBackup(t *testing.T) {
 	}
 	revisions := get(t, owner, server.URL+"/api/v1/content/posts/"+original["id"].(string)+"/revisions")
 	revItems := revisions["items"].([]any)
-	if len(revItems) == 0 || revItems[0].(map[string]any)["content"] != "第一版" {
+	if len(revItems) == 0 || revItems[0].(map[string]any)["title"] != "初稿" {
 		t.Fatalf("revisions = %#v", revItems)
 	}
-	if revItems[0].(map[string]any)["customFields"].(map[string]any)["edition"] != "第一版字段" {
-		t.Fatalf("revision did not preserve custom fields: %#v", revItems[0])
+	if _, ok := revItems[0].(map[string]any)["content"]; ok {
+		t.Fatalf("revision list unexpectedly returned the body: %#v", revItems[0])
+	}
+	if _, ok := revItems[0].(map[string]any)["customFields"]; ok {
+		t.Fatalf("revision list unexpectedly returned custom fields: %#v", revItems[0])
 	}
 	restored := postJSON(t, owner, server.URL+"/api/v1/content/posts/"+original["id"].(string)+"/revisions/"+revItems[0].(map[string]any)["id"].(string)+"/restore", map[string]any{}, http.StatusOK)
 	if restored["content"] != "第一版" || restored["customFields"].(map[string]any)["edition"] != "第一版字段" {
