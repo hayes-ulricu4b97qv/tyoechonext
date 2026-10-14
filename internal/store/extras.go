@@ -124,17 +124,21 @@ func (r *SQLiteRepository) PostRevisionContext(ctx context.Context, id string) (
 }
 
 func (r *SQLiteRepository) SaveOutboundMail(recipient, subject, body string) error {
-	tx, err := r.db.Begin()
+	return r.SaveOutboundMailContext(context.Background(), recipient, subject, body)
+}
+
+func (r *SQLiteRepository) SaveOutboundMailContext(ctx context.Context, recipient, subject, body string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin outbound mail save: %w", err)
 	}
 	defer tx.Rollback()
 	createdAt := time.Now().UTC()
-	if _, err := tx.Exec(`INSERT INTO outbound_mail(id, recipient, subject, body, created_at) VALUES (?, ?, ?, ?, ?)`, newID(), recipient, subject, body, formatTime(createdAt)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbound_mail(id, recipient, subject, body, created_at) VALUES (?, ?, ?, ?, ?)`, newID(), recipient, subject, body, formatTime(createdAt)); err != nil {
 		return fmt.Errorf("save outbound mail: %w", err)
 	}
 	cutoff := createdAt.Add(-outboundMailRetention)
-	if err := cleanupOutboundMailTx(context.Background(), tx, cutoff); err != nil {
+	if err := cleanupOutboundMailTx(ctx, tx, cutoff); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

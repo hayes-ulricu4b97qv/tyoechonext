@@ -23,7 +23,7 @@ var ErrPasswordResetBusy = errors.New("password reset delivery is busy")
 var ErrPasswordResetCleanup = errors.New("password reset token cleanup failed")
 
 const (
-	passwordResetDeliveryTimeout    = 10 * time.Second
+	mailDeliveryTimeout             = 10 * time.Second
 	passwordResetCleanupTimeout     = time.Second
 	passwordResetBusyLogInterval    = time.Minute
 	passwordResetFailureLogInterval = time.Minute
@@ -57,7 +57,7 @@ func (s *Service) MailAvailable() bool {
 	return s.mailer != nil
 }
 
-func (s *Service) notifyOwner(site *store.Site, subject, body string) {
+func (s *Service) notifyOwner(ctx context.Context, site *store.Site, subject, body string) {
 	if site == nil {
 		return
 	}
@@ -65,16 +65,17 @@ func (s *Service) notifyOwner(site *store.Site, subject, body string) {
 	if recipient == "" {
 		return
 	}
-	if err := s.repo.SaveOutboundMail(recipient, subject, body); err != nil {
-		if s.ownerNotificationFailureLogs.Allow("save", 1, time.Minute) {
+	if err := s.repo.SaveOutboundMailContext(ctx, recipient, subject, body); err != nil {
+		if ctx.Err() == nil && s.ownerNotificationFailureLogs.Allow("save", 1, time.Minute) {
 			s.logger.Warn("save owner notification failed", "subject", subject, "error", err)
 		}
 	}
 	if s.mailer != nil {
-		if err := s.mailer.Send(context.Background(), recipient, subject, body); err != nil {
-			if s.ownerNotificationFailureLogs.Allow("deliver", 1, time.Minute) {
-				s.logger.Warn("deliver owner notification failed", "subject", subject, "error", err)
-			}
+		mailCtx, cancel := context.WithTimeout(ctx, mailDeliveryTimeout)
+		deliveryErr := s.mailer.Send(mailCtx, recipient, subject, body)
+		cancel()
+		if deliveryErr != nil && ctx.Err() == nil && s.ownerNotificationFailureLogs.Allow("deliver", 1, time.Minute) {
+			s.logger.Warn("deliver owner notification failed", "subject", subject, "error", deliveryErr)
 		}
 	}
 }
@@ -179,7 +180,7 @@ func (r *PasswordResetReservation) RequestAsync(ctx context.Context, username st
 	transferred = true
 	go func() {
 		defer r.complete()
-		mailContext, cancel := context.WithTimeout(context.Background(), passwordResetDeliveryTimeout)
+		mailContext, cancel := context.WithTimeout(context.Background(), mailDeliveryTimeout)
 		deliveryErr := s.mailer.Send(mailContext, user.Email, "重置 Typecho Next 密码", body)
 		cancel()
 		if deliveryErr != nil {

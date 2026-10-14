@@ -97,7 +97,7 @@ func (s *Service) CreateCommentContext(ctx context.Context, postKey string, inpu
 	}
 	if saved.Status == "pending" {
 		body := fmt.Sprintf("文章：%s\n作者：%s\n内容：%s\n", post.Title, saved.AuthorName, saved.Content)
-		s.notifyOwner(site, "新评论待审核", body)
+		s.notifyOwner(ctx, site, "新评论待审核", body)
 	}
 	return saved, nil
 }

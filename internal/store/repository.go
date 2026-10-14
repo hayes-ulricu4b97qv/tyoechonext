@@ -322,6 +322,7 @@ type Repository interface {
 	PurgeSessions(time.Time) error
 	PurgeSessionsContext(context.Context, time.Time) error
 	SaveOutboundMail(string, string, string) error
+	SaveOutboundMailContext(context.Context, string, string, string) error
 	ListOutboundMail(int, int) (OutboundMailPage, error)
 	ListOutboundMailContext(context.Context, int, int) (OutboundMailPage, error)
 	CleanupOutboundMail(context.Context, time.Time) error
