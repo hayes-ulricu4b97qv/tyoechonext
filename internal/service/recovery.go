@@ -24,6 +24,7 @@ var ErrPasswordResetCleanup = errors.New("password reset token cleanup failed")
 
 const (
 	passwordResetDeliveryTimeout    = 10 * time.Second
+	passwordResetCleanupTimeout     = time.Second
 	passwordResetBusyLogInterval    = time.Minute
 	passwordResetFailureLogInterval = time.Minute
 )
@@ -179,7 +180,7 @@ func (r *PasswordResetReservation) RequestAsync(ctx context.Context, username st
 		cancel()
 		if deliveryErr != nil {
 			deliveryErr = fmt.Errorf("send reset email: %w", deliveryErr)
-			if cleanupErr := s.repo.DeletePasswordResetContext(context.Background(), tokenHash); cleanupErr != nil {
+			if cleanupErr := s.deletePasswordResetWithTimeout(tokenHash); cleanupErr != nil {
 				deliveryErr = errors.Join(deliveryErr, cleanupErr)
 			}
 			s.logPasswordResetDeliveryFailure(deliveryErr)
@@ -241,8 +242,14 @@ func (r *PasswordResetReservation) releaseResources() {
 	r.service.backgroundWork.Done()
 }
 
+func (s *Service) deletePasswordResetWithTimeout(tokenHash string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), passwordResetCleanupTimeout)
+	defer cancel()
+	return s.repo.DeletePasswordResetContext(cleanupCtx, tokenHash)
+}
+
 func (s *Service) discardUndispatchedPasswordReset(tokenHash string, cause error) error {
-	cleanupErr := s.repo.DeletePasswordResetContext(context.Background(), tokenHash)
+	cleanupErr := s.deletePasswordResetWithTimeout(tokenHash)
 	if cleanupErr == nil {
 		return cause
 	}

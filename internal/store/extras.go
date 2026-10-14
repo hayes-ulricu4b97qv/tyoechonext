@@ -267,8 +267,21 @@ func (r *SQLiteRepository) DeletePasswordReset(tokenHash string) error {
 	return r.DeletePasswordResetContext(context.Background(), tokenHash)
 }
 
-func (r *SQLiteRepository) DeletePasswordResetContext(ctx context.Context, tokenHash string) error {
-	if _, err := r.db.ExecContext(ctx, `DELETE FROM password_resets WHERE token_hash = ?`, tokenHash); err != nil {
+func (r *SQLiteRepository) DeletePasswordResetContext(ctx context.Context, tokenHash string) (err error) {
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("delete password reset: %w", err)
+	}
+	defer conn.Close()
+	defer func() {
+		if _, restoreErr := conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteBusyTimeoutMilliseconds)); restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore sqlite busy timeout: %w", restoreErr))
+		}
+	}()
+	if _, err = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, passwordResetCleanupBusyTimeoutMilliseconds)); err != nil {
+		return fmt.Errorf("set password reset cleanup busy timeout: %w", err)
+	}
+	if _, err = conn.ExecContext(ctx, `DELETE FROM password_resets WHERE token_hash = ?`, tokenHash); err != nil {
 		return fmt.Errorf("delete password reset: %w", err)
 	}
 	return nil

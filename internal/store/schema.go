@@ -9,7 +9,11 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const currentSchemaVersion = 2
+const (
+	currentSchemaVersion                        = 2
+	sqliteBusyTimeoutMilliseconds               = 5000
+	passwordResetCleanupBusyTimeoutMilliseconds = 100
+)
 
 func NewSQLiteRepository(path string) (*SQLiteRepository, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -18,7 +22,7 @@ func NewSQLiteRepository(path string) (*SQLiteRepository, error) {
 	// Do not enable WAL until the database has passed schema validation. SQLite
 	// persists journal_mode, so applying it while opening an unknown database
 	// would modify a file that we are about to reject.
-	dsn := "file:" + filepath.ToSlash(path) + "?_busy_timeout=5000&_foreign_keys=on"
+	dsn := fmt.Sprintf("file:%s?_busy_timeout=%d&_foreign_keys=on", filepath.ToSlash(path), sqliteBusyTimeoutMilliseconds)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
