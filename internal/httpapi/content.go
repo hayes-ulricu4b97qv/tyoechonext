@@ -14,6 +14,14 @@ import (
 )
 
 func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
+	includeDrafts := r.URL.Query().Get("includeDraft") == "true"
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	if (includeDrafts || statusFilter == "draft") && !s.requireContentEditor(w, r) {
+		return
+	}
+	if statusFilter == "draft" {
+		includeDrafts = true
+	}
 	page, pageSize, err := s.readingPage(r)
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -22,14 +30,6 @@ func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
 		status, code := serviceReadError(err)
 		writeError(w, status, code, err.Error())
 		return
-	}
-	includeDrafts := r.URL.Query().Get("includeDraft") == "true"
-	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
-	if (includeDrafts || statusFilter == "draft") && !s.requireContentEditor(w, r) {
-		return
-	}
-	if statusFilter == "draft" {
-		includeDrafts = true
 	}
 	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
