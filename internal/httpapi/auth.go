@@ -104,7 +104,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil && !errors.Is(err, service.ErrInvalidCredentials) {
-		writeError(w, http.StatusInternalServerError, "read_failed", "Unable to read administrator account")
+		s.writeRepositoryUnavailable(w, r, err)
 		return
 	}
 	if errors.Is(err, service.ErrInvalidCredentials) || admin == nil {
