@@ -79,16 +79,21 @@ func main() {
 	<-shutdown
 	stopMaintenance()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(ctx); err != nil {
-		logger.Error("graceful shutdown failed", "error", err)
+	shutdownErr := httpServer.Shutdown(ctx)
+	cancel()
+	if shutdownErr != nil {
+		logger.Error("graceful shutdown failed", "error", shutdownErr)
+		if closeErr := httpServer.Close(); closeErr != nil {
+			logger.Error("force close HTTP server failed", "error", closeErr)
+		}
+	}
+	backgroundCtx, cancelBackground := context.WithTimeout(context.Background(), 12*time.Second)
+	backgroundErr := server.WaitForBackgroundWork(backgroundCtx)
+	cancelBackground()
+	if backgroundErr != nil {
+		logger.Warn("wait for background mail delivery", "error", backgroundErr)
 	}
 	<-maintenanceDone
-	backgroundCtx, cancelBackground := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancelBackground()
-	if err := server.WaitForBackgroundWork(backgroundCtx); err != nil {
-		logger.Warn("wait for background mail delivery", "error", err)
-	}
 }
 
 func maintainDailyCleanup(ctx context.Context, repository store.Repository, logger *slog.Logger) {
