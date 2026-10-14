@@ -1,8 +1,8 @@
 # Set default behaviour, in case users don't have core.autocrlf set.
 * text=auto
 
-# Explicitly declare text files we want to always be normalized and converted 
-# to native line endings on checkout.
+# Keep web assets and Go source files on LF line endings in the working tree.
+*.go text eol=lf
 *.js text eol=lf
 *.css text eol=lf
 *.html text eol=lf
