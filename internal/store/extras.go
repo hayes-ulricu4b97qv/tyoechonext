@@ -272,6 +272,8 @@ func (r *SQLiteRepository) DeletePasswordResetContext(ctx context.Context, token
 	if err != nil {
 		return fmt.Errorf("delete password reset: %w", err)
 	}
+	// SQLite's busy handler may keep sleeping after context cancellation, so
+	// bound this cleanup's lock wait separately and restore the default below.
 	defer conn.Close()
 	defer func() {
 		if _, restoreErr := conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteBusyTimeoutMilliseconds)); restoreErr != nil {

@@ -73,6 +73,7 @@ type Service struct {
 	repo                               store.Repository
 	mailer                             Mailer
 	logger                             *slog.Logger
+	ownerNotificationFailureLogs       *HitCounter
 	passwordResetSlots                 chan struct{}
 	passwordResetLogMu                 sync.Mutex
 	lastPasswordResetLog               time.Time
@@ -93,9 +94,10 @@ func New(repo store.Repository, logger *slog.Logger, mailer Mailer) *Service {
 		logger = slog.Default()
 	}
 	return &Service{
-		repo:               repo,
-		logger:             logger,
-		mailer:             mailer,
-		passwordResetSlots: make(chan struct{}, 4),
+		repo:                         repo,
+		logger:                       logger,
+		mailer:                       mailer,
+		ownerNotificationFailureLogs: NewHitCounter(),
+		passwordResetSlots:           make(chan struct{}, 4),
 	}
 }

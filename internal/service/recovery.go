@@ -66,11 +66,15 @@ func (s *Service) notifyOwner(site *store.Site, subject, body string) {
 		return
 	}
 	if err := s.repo.SaveOutboundMail(recipient, subject, body); err != nil {
-		s.logger.Warn("save owner notification failed", "subject", subject, "error", err)
+		if s.ownerNotificationFailureLogs.Allow("save", 1, time.Minute) {
+			s.logger.Warn("save owner notification failed", "subject", subject, "error", err)
+		}
 	}
 	if s.mailer != nil {
 		if err := s.mailer.Send(context.Background(), recipient, subject, body); err != nil {
-			s.logger.Warn("deliver owner notification failed", "subject", subject, "error", err)
+			if s.ownerNotificationFailureLogs.Allow("deliver", 1, time.Minute) {
+				s.logger.Warn("deliver owner notification failed", "subject", subject, "error", err)
+			}
 		}
 	}
 }
