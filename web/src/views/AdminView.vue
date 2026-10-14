@@ -30,6 +30,9 @@ import { getDashboardStats } from '../api/settings'
 import AdminNotifications from './AdminNotifications.vue'
 import type { Comment, Media, Page, Post, Stats, Status, Term, User } from '../types'
 
+type DashboardPageKey = 'posts' | 'pages' | 'comments' | 'media' | 'terms'
+type DashboardPageOverrides = Partial<Record<DashboardPageKey, number>>
+
 const props = defineProps<{ status: Status }>()
 const adminPageSize = 100
 
@@ -91,6 +94,7 @@ const postListFilter = ref<'all' | 'published' | 'draft'>('all')
 const activeAnchor = ref('overview')
 let sectionObserver: IntersectionObserver | undefined
 let revisionRequestGeneration = 0
+let dashboardLoadGeneration = 0
 const resetToken = ref('')
 const resetPasswordValue = ref('')
 const forgotMessage = ref('')
@@ -98,42 +102,58 @@ const canEditContent = computed(() => user.value?.role === 'owner' || user.value
 const canModerateComments = computed(() => user.value?.role === 'owner' || user.value?.role === 'moderator')
 const visiblePosts = computed(() => posts.value)
 
-async function loadDashboard() {
+async function loadDashboard(pageOverrides: DashboardPageOverrides = {}) {
+  const generation = ++dashboardLoadGeneration
+  const requestedPages: Record<DashboardPageKey, number> = {
+    posts: pageOverrides.posts ?? postPage.value,
+    pages: pageOverrides.pages ?? pagePage.value,
+    comments: pageOverrides.comments ?? commentPage.value,
+    media: pageOverrides.media ?? mediaPage.value,
+    terms: pageOverrides.terms ?? termPage.value,
+  }
   loading.value = true
   error.value = ''
   try {
     const me = await getCurrentUser()
+    if (generation !== dashboardLoadGeneration) return
     user.value = me.user
     const canEdit = me.user.role === 'owner' || me.user.role === 'editor'
     const canModerate = me.user.role === 'owner' || me.user.role === 'moderator'
     const blank = <T,>() => ({ items: [] as T[], total: 0, page: 1, pageSize: adminPageSize })
     const [summary, postResponse, pageResponse, commentResponse, mediaResponse, termResponse] = await Promise.all([
       getDashboardStats(),
-      listPosts({ includeDraft: true, status: postListFilter.value === 'all' ? undefined : postListFilter.value, page: postPage.value, pageSize: adminPageSize }),
-      canEdit ? listPages(true, pagePage.value, adminPageSize) : Promise.resolve(blank<Page>()),
-      canModerate ? listModerationComments(commentStatus.value, commentPage.value, adminPageSize) : Promise.resolve(blank<Comment>()),
-      canEdit ? listMedia(mediaPage.value, adminPageSize) : Promise.resolve(blank<Media>()),
-      canEdit ? listTerms(true, termPage.value, adminPageSize) : Promise.resolve(blank<Term>()),
+      listPosts({ includeDraft: true, status: postListFilter.value === 'all' ? undefined : postListFilter.value, page: requestedPages.posts, pageSize: adminPageSize }),
+      canEdit ? listPages(true, requestedPages.pages, adminPageSize) : Promise.resolve(blank<Page>()),
+      canModerate ? listModerationComments(commentStatus.value, requestedPages.comments, adminPageSize) : Promise.resolve(blank<Comment>()),
+      canEdit ? listMedia(requestedPages.media, adminPageSize) : Promise.resolve(blank<Media>()),
+      canEdit ? listTerms(true, requestedPages.terms, adminPageSize) : Promise.resolve(blank<Term>()),
     ])
+    if (generation !== dashboardLoadGeneration) return
     stats.value = summary
     posts.value = postResponse.items
+    postPage.value = postResponse.page
     postTotal.value = postResponse.total
     pages.value = pageResponse.items
+    pagePage.value = pageResponse.page
     pageTotal.value = pageResponse.total
     moderationComments.value = commentResponse.items
+    commentPage.value = commentResponse.page
     commentTotal.value = commentResponse.total
     media.value = mediaResponse.items
+    mediaPage.value = mediaResponse.page
     mediaTotal.value = mediaResponse.total
     terms.value = termResponse.items
+    termPage.value = termResponse.page
     termTotal.value = termResponse.total
   } catch (reason) {
+    if (generation !== dashboardLoadGeneration) return
     if (!(reason instanceof ApiError && reason.status === 401)) {
       error.value = reason instanceof ApiError ? reason.message : '管理数据加载失败'
     }
   } finally {
-    loading.value = false
+    if (generation === dashboardLoadGeneration) loading.value = false
   }
-  if (user.value) await bindSections()
+  if (generation === dashboardLoadGeneration && user.value) await bindSections()
 }
 
 function bindSections() {
@@ -176,45 +196,38 @@ function pageCount(total: number) {
 
 async function changePostPage(next: number) {
   if (next < 1 || next > pageCount(postTotal.value)) return
-  postPage.value = next
-  await loadDashboard()
+  await loadDashboard({ posts: next })
 }
 
 async function switchPostFilter(filter: 'all' | 'published' | 'draft') {
   if (postListFilter.value === filter) return
   postListFilter.value = filter
-  postPage.value = 1
-  await loadDashboard()
+  await loadDashboard({ posts: 1 })
 }
 
 async function changePagePage(next: number) {
   if (next < 1 || next > pageCount(pageTotal.value)) return
-  pagePage.value = next
-  await loadDashboard()
+  await loadDashboard({ pages: next })
 }
 
 async function changeMediaPage(next: number) {
   if (next < 1 || next > pageCount(mediaTotal.value)) return
-  mediaPage.value = next
-  await loadDashboard()
+  await loadDashboard({ media: next })
 }
 
 async function changeTermPage(next: number) {
   if (next < 1 || next > pageCount(termTotal.value)) return
-  termPage.value = next
-  await loadDashboard()
+  await loadDashboard({ terms: next })
 }
 
 async function changeCommentPage(next: number) {
   if (next < 1 || next > pageCount(commentTotal.value)) return
-  commentPage.value = next
-  await loadDashboard()
+  await loadDashboard({ comments: next })
 }
 
 async function switchCommentStatus(status: 'pending' | 'approved' | 'spam') {
   commentStatus.value = status
-  commentPage.value = 1
-  await loadDashboard()
+  await loadDashboard({ comments: 1 })
 }
 
 async function startEdit(post: Post) {
