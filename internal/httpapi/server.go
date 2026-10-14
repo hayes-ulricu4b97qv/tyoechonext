@@ -212,13 +212,20 @@ func (s *Server) routeGuard(next http.Handler) http.Handler {
 				}
 			}
 		}
-		if path.Clean(r.URL.Path) == "/user" {
+		cleanReaderPath := path.Clean(r.URL.Path)
+		isReaderContentPath := cleanReaderPath == "/user" || strings.HasPrefix(cleanReaderPath, "/user/") ||
+			cleanReaderPath == "/page" || strings.HasPrefix(cleanReaderPath, "/page/")
+		if isReaderContentPath {
 			values, err := url.ParseQuery(r.URL.RawQuery)
 			if err != nil {
 				http.Error(w, "请求参数格式无效", http.StatusBadRequest)
 				return
 			}
-			for _, key := range scalarReaderQueryParameters {
+			keys := []string{"preview"}
+			if cleanReaderPath == "/user" {
+				keys = scalarReaderQueryParameters
+			}
+			for _, key := range keys {
 				if len(values[key]) > 1 {
 					http.Error(w, fmt.Sprintf("查询参数 %s 只能指定一次", key), http.StatusBadRequest)
 					return
