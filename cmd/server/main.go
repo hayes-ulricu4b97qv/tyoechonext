@@ -18,6 +18,8 @@ import (
 	"github.com/untesheazulchunghu-beep/typecho/internal/store"
 )
 
+const maintenanceOperationTimeout = 10 * time.Second
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	dataDir := envOr("APP_DATA_DIR", "./data")
@@ -46,7 +48,7 @@ func main() {
 	}
 	defer repository.Close()
 	cleanOutboundMail(context.Background(), repository, logger)
-	cleanExpiredSessions(repository, logger)
+	cleanExpiredSessions(context.Background(), repository, logger)
 
 	server := httpapi.NewServer(repository, settings, logger, configuredMailer)
 	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
@@ -98,13 +100,13 @@ func maintainDailyCleanup(ctx context.Context, repository store.Repository, logg
 			return
 		case <-ticker.C:
 			cleanOutboundMail(ctx, repository, logger)
-			cleanExpiredSessions(repository, logger)
+			cleanExpiredSessions(ctx, repository, logger)
 		}
 	}
 }
 
 func cleanOutboundMail(ctx context.Context, repository store.Repository, logger *slog.Logger) {
-	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(ctx, maintenanceOperationTimeout)
 	defer cancel()
 	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	if err := repository.CleanupOutboundMail(cleanupCtx, cutoff); err != nil && !errors.Is(err, context.Canceled) {
@@ -112,8 +114,10 @@ func cleanOutboundMail(ctx context.Context, repository store.Repository, logger 
 	}
 }
 
-func cleanExpiredSessions(repository store.Repository, logger *slog.Logger) {
-	if err := repository.PurgeSessions(time.Now().UTC()); err != nil {
+func cleanExpiredSessions(ctx context.Context, repository store.Repository, logger *slog.Logger) {
+	cleanupCtx, cancel := context.WithTimeout(ctx, maintenanceOperationTimeout)
+	defer cancel()
+	if err := repository.PurgeSessionsContext(cleanupCtx, time.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Warn("clean expired sessions", "error", err)
 	}
 }
